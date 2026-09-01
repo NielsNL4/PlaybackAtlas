@@ -8,22 +8,21 @@ import {
   type CreatedPlaylist,
   type SpotifySession,
 } from '../services/spotify'
-import type { TrackResult } from '../types'
-
 interface PlaylistButtonProps {
-  tracks: TrackResult[]
+  trackUris: string[]
+  totalTracks: number
   rangeLabel: string
   authReady: boolean
 }
 
-export function PlaylistButton({ tracks, rangeLabel, authReady }: PlaylistButtonProps) {
+export function PlaylistButton({ trackUris, totalTracks, rangeLabel, authReady }: PlaylistButtonProps) {
   const [open, setOpen] = useState(false)
   const [session, setSession] = useState<SpotifySession | null>(null)
   const [isPublic, setIsPublic] = useState(false)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const [created, setCreated] = useState<CreatedPlaylist | null>(null)
-  const eligible = tracks.filter((track) => track.spotifyTrackUri?.startsWith('spotify:track:'))
+  const eligible = [...new Set(trackUris.filter((uri) => uri.startsWith('spotify:track:')))]
 
   useEffect(() => {
     if (authReady) void getSpotifySession().then(setSession)
@@ -35,7 +34,7 @@ export function PlaylistButton({ tracks, rangeLabel, authReady }: PlaylistButton
     try {
       const playlist = await createPlaylist(
         `Top Tracks - ${rangeLabel} (Exported)`,
-        eligible.flatMap((track) => track.spotifyTrackUri ? [track.spotifyTrackUri] : []),
+        eligible,
         isPublic,
       )
       setCreated(playlist)
@@ -48,7 +47,7 @@ export function PlaylistButton({ tracks, rangeLabel, authReady }: PlaylistButton
 
   return (
     <>
-      <button className="spotify-button" onClick={() => setOpen(true)} disabled={!tracks.length}>
+      <button className="spotify-button" onClick={() => setOpen(true)} disabled={!totalTracks}>
         <Music2 size={17} /> Create playlist
       </button>
       {open && (
@@ -67,7 +66,7 @@ export function PlaylistButton({ tracks, rangeLabel, authReady }: PlaylistButton
               <>
                 <span className="kicker">EXPORT TO SPOTIFY</span>
                 <h2 id="playlist-title">Turn the chart into a playlist.</h2>
-                <p>{eligible.length} of {tracks.length} ranked tracks have a valid Spotify URI.</p>
+                <p>{eligible.length} of {totalTracks} ranked tracks have a valid Spotify URI.</p>
                 {!session ? (
                   <button className="primary-action" onClick={() => void connectSpotify()}>Connect Spotify</button>
                 ) : (

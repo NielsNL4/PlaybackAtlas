@@ -4,14 +4,14 @@ import * as duckdb from '@duckdb/duckdb-wasm'
 import duckdbWorkerUrl from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url'
 import duckdbWasmUrl from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url'
 import type { AsyncDuckDBConnection } from '@duckdb/duckdb-wasm'
-import type { IngestResult, QueryFilters, TrackResult } from '../types'
+import type { AnalyticsResult, IngestResult, QueryFilters } from '../types'
 
 type WorkerRequest =
   | { id: number; type: 'ingest'; files: File[] }
   | { id: number; type: 'query'; filters: QueryFilters }
 
 type WorkerResponse =
-  | { id: number; type: 'result'; result: IngestResult | TrackResult[] }
+  | { id: number; type: 'result'; result: IngestResult | AnalyticsResult }
   | { id: number; type: 'progress'; progress: number; label: string }
   | { id: number; type: 'error'; error: string }
 
@@ -125,42 +125,61 @@ async function ingest(id: number, files: File[]): Promise<IngestResult> {
   }
 }
 
-async function queryTracks(filters: QueryFilters): Promise<TrackResult[]> {
+async function queryTracks(filters: QueryFilters): Promise<AnalyticsResult> {
   const conn = await getConnection()
   const orderBy = filters.metric === 'plays' ? 'play_count' : 'total_ms'
   const statement = await conn.prepare(`
+    CREATE OR REPLACE TEMP TABLE ranked_tracks AS
+    WITH aggregated AS (
+      SELECT
+        track_name,
+        artist_name,
+        album_name,
+        spotify_track_uri,
+        count(*)::DOUBLE AS play_count,
+        sum(ms_played)::DOUBLE AS total_ms
+      FROM listening_history
+      WHERE played_at >= try_cast(? AS DATE)
+        AND played_at < try_cast(? AS DATE) + INTERVAL 1 DAY
+        AND ms_played >= ?
+      GROUP BY track_name, artist_name, album_name, spotify_track_uri
+    )
     SELECT
-      track_name,
-      artist_name,
-      album_name,
-      spotify_track_uri,
-      count(*)::DOUBLE AS play_count,
-      sum(ms_played)::DOUBLE AS total_ms
-    FROM listening_history
-    WHERE played_at >= try_cast(? AS DATE)
-      AND played_at < try_cast(? AS DATE) + INTERVAL 1 DAY
-      AND ms_played >= ?
-    GROUP BY track_name, artist_name, album_name, spotify_track_uri
-    ORDER BY ${orderBy} DESC, track_name ASC
-    LIMIT ?;
+      row_number() OVER (ORDER BY ${orderBy} DESC, track_name ASC)::DOUBLE AS rank,
+      *
+    FROM aggregated;
   `)
 
   try {
-    const result = await statement.query(
+    await statement.query(
       filters.startDate,
       filters.endDate,
       filters.minMs,
-      filters.limit,
     )
-    return result.toArray().map((row, index) => ({
-      rank: index + 1,
-      trackName: String(row.track_name),
-      artistName: String(row.artist_name),
-      albumName: row.album_name == null ? null : String(row.album_name),
-      spotifyTrackUri: row.spotify_track_uri == null ? null : String(row.spotify_track_uri),
-      playCount: Number(row.play_count),
-      totalMs: Number(row.total_ms),
-    }))
+    const offset = Math.max(0, filters.page - 1) * 50
+    const page = await conn.query(
+      `SELECT * FROM ranked_tracks WHERE rank > ${offset} AND rank <= ${offset + 50} ORDER BY rank;`,
+    )
+    const summary = await conn.query('SELECT count(*)::DOUBLE AS total_tracks FROM ranked_tracks;')
+    const uris = await conn.query(`
+      SELECT spotify_track_uri
+      FROM ranked_tracks
+      WHERE spotify_track_uri LIKE 'spotify:track:%'
+      ORDER BY rank;
+    `)
+    return {
+      tracks: page.toArray().map((row) => ({
+        rank: Number(row.rank),
+        trackName: String(row.track_name),
+        artistName: String(row.artist_name),
+        albumName: row.album_name == null ? null : String(row.album_name),
+        spotifyTrackUri: row.spotify_track_uri == null ? null : String(row.spotify_track_uri),
+        playCount: Number(row.play_count),
+        totalMs: Number(row.total_ms),
+      })),
+      totalTracks: Number(summary.toArray()[0].total_tracks),
+      spotifyTrackUris: uris.toArray().map((row) => String(row.spotify_track_uri)),
+    }
   } finally {
     await statement.close()
   }

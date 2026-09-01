@@ -100,6 +100,7 @@ html, body, .topbar, .hero, .workspace, footer, .dashboard, .modal, .drop-zone, 
 .rule { border-top: 1px solid var(--line); margin: 13px 0 22px; }
 .field-label { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font: 600 11px 'DM Mono'; text-transform: uppercase; margin-bottom: 14px; }
 .field-label select { margin: 3px 0 0; flex-basis: 100%; }
+.result-note { margin-top: 20px; border-left: 3px solid var(--acid); padding-left: 10px; color: var(--muted); font: 400 10px/1.7 'DM Mono'; text-transform: uppercase; }
 
 .ranking-panel { min-width: 0; }
 .ranking-header { min-height: 128px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 22px 28px; border-bottom: 1px solid var(--ink); }
@@ -109,15 +110,24 @@ html, body, .topbar, .hero, .workspace, footer, .dashboard, .modal, .drop-zone, 
 .metric-toggle button { display: flex; justify-content: center; align-items: center; gap: 5px; }
 .track-list { transition: opacity .15s; }
 .track-list.is-loading { opacity: .35; pointer-events: none; }
-.track-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) 100px; min-height: 76px; align-items: center; border-bottom: 1px solid var(--line); padding: 10px 26px 10px 0; }
+.track-row { display: grid; grid-template-columns: 56px 48px minmax(0, 1fr) 100px; gap: 14px; min-height: 76px; align-items: center; border-bottom: 1px solid var(--line); padding: 10px 26px 10px 0; }
 .track-row:last-child { border-bottom: 0; }
 .track-row:hover { background: var(--surface-hover); }
 .rank { text-align: center; font: 400 11px 'DM Mono'; color: var(--muted); }
+.album-art { width: 48px; height: 48px; display: block; object-fit: cover; background: var(--surface-control); }
+.album-fallback { display: grid; place-items: center; color: var(--muted); border: 1px solid var(--line); }
 .track-copy, .stat { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .track-copy strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
 .track-copy small, .stat small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 10px; }
 .stat { text-align: right; font: 400 11px 'DM Mono'; }
 .empty-chart { min-height: 260px; display: flex; flex-direction: column; gap: 12px; justify-content: center; align-items: center; color: var(--muted); }
+.pagination { min-height: 74px; border-top: 1px solid var(--ink); padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.page-summary { color: var(--muted); font: 400 10px 'DM Mono'; text-transform: uppercase; }
+.page-buttons { display: flex; align-items: center; gap: 4px; }
+.page-buttons button { width: 34px; height: 34px; border: 1px solid var(--line); background: transparent; display: grid; place-items: center; cursor: pointer; font: 500 10px 'DM Mono'; }
+.page-buttons button:hover:not(:disabled), .page-buttons button.active { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.page-buttons button:disabled { opacity: .35; cursor: not-allowed; }
+.page-ellipsis { width: 24px; text-align: center; color: var(--muted); }
 
 .error-banner { position: fixed; left: 50%; bottom: 25px; transform: translateX(-50%); z-index: 20; width: min(600px, calc(100% - 30px)); background: #2b1b16; color: #fff; padding: 14px 17px; display: flex; justify-content: space-between; gap: 15px; font-size: 12px; box-shadow: 0 8px 35px #0003; }
 .error-banner button { border: 0; color: var(--acid); background: transparent; cursor: pointer; }
@@ -154,7 +164,10 @@ footer span { color: var(--muted); }
   .control-rail { border-right: 0; border-bottom: 1px solid var(--ink); }
   .ranking-header { align-items: flex-start; flex-direction: column; }
   .metric-toggle { width: 100%; }
-  .track-row { grid-template-columns: 42px minmax(0, 1fr) 75px; padding-right: 12px; }
+  .track-row { grid-template-columns: 36px 42px minmax(0, 1fr) 70px; gap: 9px; padding-right: 10px; }
+  .album-art { width: 42px; height: 42px; }
+  .pagination { align-items: flex-start; flex-direction: column; padding: 14px; }
+  .page-buttons { width: 100%; justify-content: center; }
   .modal { padding: 38px 25px; box-shadow: 6px 6px 0 var(--acid); }
   footer span { display: none; }
 }

@@ -1,4 +1,4 @@
-import type { IngestResult, QueryFilters, TrackResult } from '../types'
+import type { AnalyticsResult, IngestResult, QueryFilters } from '../types'
 
 type ProgressCallback = (progress: number, label: string) => void
 
@@ -61,7 +61,7 @@ class AnalyticsService {
   }
 
   query(filters: QueryFilters) {
-    return this.request<TrackResult[]>({ type: 'query', filters })
+    return this.request<AnalyticsResult>({ type: 'query', filters })
   }
 }
 

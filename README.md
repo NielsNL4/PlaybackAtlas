@@ -125,6 +125,6 @@ npm run generate:test-history -- --year 2025
 ## Privacy and Limits
 
 - History files and query results remain in the tab's memory and are discarded on reload.
-- Only playlist data and OAuth/API requests are sent to Spotify when the user connects.
+- Visible Spotify track IDs are sent to Spotify's public oEmbed endpoint to retrieve album artwork. Playlist data and authenticated API requests are sent only when the user connects.
 - Tokens in browser storage are accessible to JavaScript on this origin. The app avoids third-party runtime scripts, but normal client-side security practices and dependency review still apply.
 - DuckDB's WASM binary is about 40 MB uncompressed and is cached by the browser after first load.

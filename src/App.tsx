@@ -4,7 +4,7 @@ import { Dashboard } from './components/Dashboard'
 import { FileUpload } from './components/FileUpload'
 import { PlaylistButton } from './components/PlaylistButton'
 import { analytics } from './services/analytics'
-import { handleSpotifyCallback } from './services/spotify'
+import { getTrackArtwork, handleSpotifyCallback } from './services/spotify'
 import type { DateBounds, QueryFilters, TrackResult } from './types'
 
 const defaultFilters: QueryFilters = {
@@ -12,7 +12,7 @@ const defaultFilters: QueryFilters = {
   endDate: '',
   minMs: 30_000,
   metric: 'plays',
-  limit: 50,
+  page: 1,
 }
 
 function App() {
@@ -22,6 +22,9 @@ function App() {
   const [bounds, setBounds] = useState<DateBounds | null>(null)
   const [filters, setFilters] = useState(defaultFilters)
   const [tracks, setTracks] = useState<TrackResult[]>([])
+  const [totalTracks, setTotalTracks] = useState(0)
+  const [spotifyTrackUris, setSpotifyTrackUris] = useState<string[]>([])
+  const [artwork, setArtwork] = useState<Record<string, string>>({})
   const [rowCount, setRowCount] = useState(0)
   const [busy, setBusy] = useState(false)
   const [querying, setQuerying] = useState(false)
@@ -46,7 +49,19 @@ function App() {
     setQuerying(true)
     try {
       const result = await analytics.query(nextFilters)
-      if (sequence === querySequence.current) setTracks(result)
+      if (sequence === querySequence.current) {
+        setTracks(result.tracks)
+        setTotalTracks(result.totalTracks)
+        setSpotifyTrackUris(result.spotifyTrackUris)
+        const pageUris = result.tracks.flatMap((track) => track.spotifyTrackUri ? [track.spotifyTrackUri] : [])
+        void getTrackArtwork(pageUris)
+          .then((images) => {
+            if (sequence === querySequence.current) {
+              setArtwork((current) => ({ ...current, ...images }))
+            }
+          })
+          .catch(() => undefined)
+      }
     } catch (reason) {
       if (sequence === querySequence.current) {
         setError(reason instanceof Error ? reason.message : 'Query failed.')
@@ -119,10 +134,10 @@ function App() {
             <div className="dataset-banner">
               <span><strong>{rowCount.toLocaleString()}</strong> plays indexed</span>
               <span>{bounds.min} → {bounds.max}</span>
-              <button onClick={() => { setBounds(null); setTracks([]); setRowCount(0) }}><RotateCcw size={14} /> Replace files</button>
-              <PlaylistButton tracks={tracks} rangeLabel={rangeLabel} authReady={authReady} />
+              <button onClick={() => { setBounds(null); setTracks([]); setTotalTracks(0); setSpotifyTrackUris([]); setArtwork({}); setRowCount(0) }}><RotateCcw size={14} /> Replace files</button>
+              <PlaylistButton trackUris={spotifyTrackUris} totalTracks={totalTracks} rangeLabel={rangeLabel} authReady={authReady} />
             </div>
-            <Dashboard bounds={bounds} filters={filters} tracks={tracks} loading={querying} onChange={(nextFilters) => void updateFilters(nextFilters)} />
+            <Dashboard bounds={bounds} filters={filters} tracks={tracks} totalTracks={totalTracks} artwork={artwork} loading={querying} onChange={(nextFilters) => void updateFilters(nextFilters)} />
           </>
         )}
         {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}

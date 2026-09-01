@@ -23,6 +23,17 @@ interface SpotifyUser {
   display_name: string | null
 }
 
+interface SpotifyTrackMetadata {
+  uri: string
+  album: {
+    images: Array<{ url: string; width: number | null; height: number | null }>
+  }
+}
+
+interface SpotifyOEmbedResponse {
+  thumbnail_url?: string
+}
+
 export interface SpotifySession {
   displayName: string
 }
@@ -32,6 +43,8 @@ export interface CreatedPlaylist {
   url: string
   trackCount: number
 }
+
+const artworkCache = new Map<string, string>()
 
 function configuration() {
   const clientId = import.meta.env.VITE_SPOTIFY_CLIENT_ID
@@ -185,6 +198,58 @@ export async function getSpotifySession(): Promise<SpotifySession | null> {
 
 export function disconnectSpotify() {
   localStorage.removeItem(TOKEN_KEY)
+}
+
+async function fetchPublicArtwork(uris: string[]) {
+  for (let index = 0; index < uris.length; index += 8) {
+    const batch = uris.slice(index, index + 8)
+    await Promise.all(batch.map(async (uri) => {
+      const trackId = uri.slice('spotify:track:'.length)
+      const params = new URLSearchParams({ url: `https://open.spotify.com/track/${trackId}` })
+      try {
+        const response = await fetch(`https://open.spotify.com/oembed?${params}`)
+        if (!response.ok) return
+        const metadata = await response.json() as SpotifyOEmbedResponse
+        if (metadata.thumbnail_url) artworkCache.set(uri, metadata.thumbnail_url)
+      } catch {
+        // Individual artwork failures retain the local placeholder.
+      }
+    }))
+  }
+}
+
+export async function getTrackArtwork(uris: string[]) {
+  const validUris = [...new Set(uris.filter((uri) => /^spotify:track:[A-Za-z0-9]+$/.test(uri)))]
+  let missingUris = validUris.filter((uri) => !artworkCache.has(uri))
+
+  if (readToken()) {
+    try {
+      for (let index = 0; index < missingUris.length; index += 50) {
+        const batch = missingUris.slice(index, index + 50)
+        const ids = batch.map((uri) => uri.slice('spotify:track:'.length)).join(',')
+        const response = await api<{ tracks: Array<SpotifyTrackMetadata | null> }>(
+          `/tracks?ids=${encodeURIComponent(ids)}`,
+        )
+        response.tracks.forEach((track) => {
+          const image = track?.album.images.find((candidate) => (candidate.width || 0) >= 64)
+            || track?.album.images[0]
+          if (track && image) artworkCache.set(track.uri, image.url)
+        })
+      }
+    } catch {
+      // Public oEmbed below also works when an access token is stale or unavailable.
+    }
+  }
+
+  missingUris = validUris.filter((uri) => !artworkCache.has(uri))
+  await fetchPublicArtwork(missingUris)
+
+  return Object.fromEntries(
+    validUris.flatMap((uri) => {
+      const artwork = artworkCache.get(uri)
+      return artwork ? [[uri, artwork]] : []
+    }),
+  ) as Record<string, string>
 }
 
 export async function createPlaylist(

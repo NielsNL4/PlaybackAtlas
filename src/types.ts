@@ -10,7 +10,7 @@ export interface QueryFilters {
   endDate: string
   minMs: number
   metric: RankingMetric
-  limit: 50 | 100
+  page: number
 }
 
 export interface TrackResult {
@@ -21,6 +21,12 @@ export interface TrackResult {
   spotifyTrackUri: string | null
   playCount: number
   totalMs: number
+}
+
+export interface AnalyticsResult {
+  tracks: TrackResult[]
+  totalTracks: number
+  spotifyTrackUris: string[]
 }
 
 export interface IngestResult {
