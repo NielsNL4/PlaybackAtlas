@@ -3,6 +3,7 @@ const API_URL = 'https://api.spotify.com/v1'
 const TOKEN_KEY = 'playback-atlas.spotify-token'
 const VERIFIER_KEY = 'playback-atlas.pkce-verifier'
 const STATE_KEY = 'playback-atlas.oauth-state'
+const METADATA_KEY = 'playback-atlas.spotify-metadata'
 
 interface StoredToken {
   accessToken: string
@@ -34,6 +35,27 @@ interface SpotifyOEmbedResponse {
   thumbnail_url?: string
 }
 
+interface SpotifyInsightTrack {
+  uri: string
+  duration_ms: number
+  popularity: number
+  album: { release_date: string }
+  artists: Array<{ id: string }>
+}
+
+interface SpotifyArtistMetadata {
+  id: string
+  genres: string[]
+}
+
+interface CachedTrackMetadata {
+  uri: string
+  durationMs: number
+  popularity: number
+  releaseYear: number | null
+  genres: string[]
+}
+
 export interface SpotifySession {
   displayName: string
 }
@@ -44,7 +66,31 @@ export interface CreatedPlaylist {
   trackCount: number
 }
 
+export interface InsightEnrichment {
+  trackCount: number
+  averageDurationMs: number
+  averagePopularity: number
+  genres: Array<{ name: string; count: number }>
+  releaseEras: Array<{ name: string; count: number }>
+}
+
 const artworkCache = new Map<string, string>()
+const metadataCache = new Map<string, CachedTrackMetadata>()
+let currentUserCache: SpotifyUser | null = null
+
+try {
+  const storedMetadata = localStorage.getItem(METADATA_KEY)
+  if (storedMetadata) {
+    const entries = JSON.parse(storedMetadata) as CachedTrackMetadata[]
+    entries.forEach((entry) => metadataCache.set(entry.uri, entry))
+  }
+} catch {
+  try {
+    localStorage.removeItem(METADATA_KEY)
+  } catch {
+    // Storage can be unavailable in restrictive browser modes.
+  }
+}
 
 function configuration() {
   const clientId = import.meta.env.VITE_SPOTIFY_CLIENT_ID
@@ -70,7 +116,10 @@ function base64Url(bytes: Uint8Array) {
 }
 
 async function codeChallenge(verifier: string) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+  if (!window.crypto?.subtle) {
+    throw new Error('Spotify login requires HTTPS or a 127.0.0.1 address. Open the app through its secure URL and try again.')
+  }
+  const digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
   return base64Url(new Uint8Array(digest))
 }
 
@@ -121,7 +170,7 @@ async function validAccessToken() {
   return storeToken(response, token.refreshToken).accessToken
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
+async function api<T>(path: string, init?: RequestInit, attempt = 0): Promise<T> {
   const accessToken = await validAccessToken()
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
@@ -131,6 +180,11 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   })
+  if (response.status === 429 && attempt < 3) {
+    const retryAfter = Number(response.headers.get('retry-after') || 1)
+    await new Promise((resolve) => window.setTimeout(resolve, retryAfter * 1000))
+    return api<T>(path, init, attempt + 1)
+  }
   if (response.status === 401) localStorage.removeItem(TOKEN_KEY)
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: { message?: string } } | null
@@ -190,6 +244,7 @@ export async function getSpotifySession(): Promise<SpotifySession | null> {
   if (!readToken()) return null
   try {
     const user = await api<SpotifyUser>('/me')
+    currentUserCache = user
     return { displayName: user.display_name || user.id }
   } catch {
     return null
@@ -198,6 +253,7 @@ export async function getSpotifySession(): Promise<SpotifySession | null> {
 
 export function disconnectSpotify() {
   localStorage.removeItem(TOKEN_KEY)
+  currentUserCache = null
 }
 
 async function fetchPublicArtwork(uris: string[]) {
@@ -252,6 +308,71 @@ export async function getTrackArtwork(uris: string[]) {
   ) as Record<string, string>
 }
 
+export async function getInsightEnrichment(uris: string[]): Promise<InsightEnrichment> {
+  const validUris = [...new Set(uris.filter((uri) => /^spotify:track:[A-Za-z0-9]+$/.test(uri)))]
+  const missingUris = validUris.filter((uri) => !metadataCache.has(uri))
+
+  for (let index = 0; index < missingUris.length; index += 50) {
+    const batch = missingUris.slice(index, index + 50)
+    const ids = batch.map((uri) => uri.slice('spotify:track:'.length)).join(',')
+    const trackResponse = await api<{ tracks: Array<SpotifyInsightTrack | null> }>(
+      `/tracks?ids=${encodeURIComponent(ids)}`,
+    )
+    const tracks = trackResponse.tracks.filter((track): track is SpotifyInsightTrack => Boolean(track))
+    const artistIds = [...new Set(tracks.flatMap((track) => track.artists.map((artist) => artist.id)))]
+    const genresByArtist = new Map<string, string[]>()
+
+    for (let artistIndex = 0; artistIndex < artistIds.length; artistIndex += 50) {
+      const artistBatch = artistIds.slice(artistIndex, artistIndex + 50)
+      const artistResponse = await api<{ artists: Array<SpotifyArtistMetadata | null> }>(
+        `/artists?ids=${encodeURIComponent(artistBatch.join(','))}`,
+      )
+      artistResponse.artists.forEach((artist) => {
+        if (artist) genresByArtist.set(artist.id, artist.genres || [])
+      })
+    }
+
+    tracks.forEach((track) => {
+      const releaseYear = Number(track.album.release_date?.slice(0, 4))
+      metadataCache.set(track.uri, {
+        uri: track.uri,
+        durationMs: Number(track.duration_ms) || 0,
+        popularity: Number(track.popularity) || 0,
+        releaseYear: Number.isFinite(releaseYear) ? releaseYear : null,
+        genres: [...new Set(track.artists.flatMap((artist) => genresByArtist.get(artist.id) || []))],
+      })
+    })
+  }
+
+  try {
+    localStorage.setItem(METADATA_KEY, JSON.stringify([...metadataCache.values()].slice(-500)))
+  } catch {
+    // Metadata caching is optional and must not block Insights.
+  }
+
+  const tracks = validUris.flatMap((uri) => {
+    const metadata = metadataCache.get(uri)
+    return metadata ? [metadata] : []
+  })
+  const genreCounts = new Map<string, number>()
+  const eraCounts = new Map<string, number>()
+  tracks.forEach((track) => {
+    track.genres.forEach((genre) => genreCounts.set(genre, (genreCounts.get(genre) || 0) + 1))
+    if (track.releaseYear) {
+      const era = `${Math.floor(track.releaseYear / 10) * 10}s`
+      eraCounts.set(era, (eraCounts.get(era) || 0) + 1)
+    }
+  })
+
+  return {
+    trackCount: tracks.length,
+    averageDurationMs: tracks.length ? tracks.reduce((sum, track) => sum + track.durationMs, 0) / tracks.length : 0,
+    averagePopularity: tracks.length ? tracks.reduce((sum, track) => sum + track.popularity, 0) / tracks.length : 0,
+    genres: [...genreCounts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 12),
+    releaseEras: [...eraCounts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name)),
+  }
+}
+
 export async function createPlaylist(
   name: string,
   uris: string[],
@@ -262,7 +383,8 @@ export async function createPlaylist(
     throw new Error('No Spotify track URIs are available in the selected history.')
   }
 
-  const user = await api<SpotifyUser>('/me')
+  const user = currentUserCache || await api<SpotifyUser>('/me')
+  currentUserCache = user
   const playlist = await api<{ id: string; name: string; external_urls: { spotify: string } }>(
     `/users/${encodeURIComponent(user.id)}/playlists`,
     {

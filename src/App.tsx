@@ -1,9 +1,11 @@
-import { Code2, Database, LockKeyhole, Moon, RotateCcw, Sun } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { BarChart3, Code2, Database, HardDrive, ListMusic, LoaderCircle, LockKeyhole, Moon, RotateCcw, Sun, Trash2 } from 'lucide-react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { Dashboard } from './components/Dashboard'
 import { FileUpload } from './components/FileUpload'
+import { Insights } from './components/Insights'
 import { PlaylistButton } from './components/PlaylistButton'
 import { analytics } from './services/analytics'
+import { cacheHistoryFiles, clearCachedHistory, getCachedHistoryFiles } from './services/historyCache'
 import { getTrackArtwork, handleSpotifyCallback } from './services/spotify'
 import type { DateBounds, QueryFilters, TrackResult } from './types'
 
@@ -23,7 +25,6 @@ function App() {
   const [filters, setFilters] = useState(defaultFilters)
   const [tracks, setTracks] = useState<TrackResult[]>([])
   const [totalTracks, setTotalTracks] = useState(0)
-  const [spotifyTrackUris, setSpotifyTrackUris] = useState<string[]>([])
   const [artwork, setArtwork] = useState<Record<string, string>>({})
   const [rowCount, setRowCount] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -32,7 +33,11 @@ function App() {
   const [progressLabel, setProgressLabel] = useState('Preparing analytics')
   const [error, setError] = useState('')
   const [authReady, setAuthReady] = useState(false)
+  const [restoring, setRestoring] = useState(true)
+  const [cacheState, setCacheState] = useState<'checking' | 'cached' | 'session'>('checking')
+  const [activeView, setActiveView] = useState<'overview' | 'insights'>('overview')
   const callbackStarted = useRef(false)
+  const restoreStarted = useRef(false)
   const querySequence = useRef(0)
 
   useEffect(() => {
@@ -41,6 +46,29 @@ function App() {
     void handleSpotifyCallback()
       .catch((reason) => setError(reason instanceof Error ? reason.message : 'Spotify connection failed.'))
       .finally(() => setAuthReady(true))
+  }, [])
+
+  const restoreHistory = useEffectEvent(async () => {
+    try {
+      const files = await getCachedHistoryFiles()
+      if (files.length) {
+        setProgressLabel('Restoring your history')
+        await ingest(files, false)
+      } else {
+        setCacheState('session')
+      }
+    } catch (reason) {
+      setCacheState('session')
+      setError(reason instanceof Error ? reason.message : 'Cached history could not be restored.')
+    } finally {
+      setRestoring(false)
+    }
+  })
+
+  useEffect(() => {
+    if (restoreStarted.current) return
+    restoreStarted.current = true
+    void restoreHistory()
   }, [])
 
   async function updateFilters(nextFilters: QueryFilters) {
@@ -52,7 +80,6 @@ function App() {
       if (sequence === querySequence.current) {
         setTracks(result.tracks)
         setTotalTracks(result.totalTracks)
-        setSpotifyTrackUris(result.spotifyTrackUris)
         const pageUris = result.tracks.flatMap((track) => track.spotifyTrackUri ? [track.spotifyTrackUri] : [])
         void getTrackArtwork(pageUris)
           .then((images) => {
@@ -71,7 +98,7 @@ function App() {
     }
   }
 
-  async function ingest(files: File[]) {
+  async function ingest(files: File[], shouldCache = true) {
     setBusy(true)
     setError('')
     setProgress(0)
@@ -80,6 +107,18 @@ function App() {
         setProgress(nextProgress)
         setProgressLabel(label)
       })
+      if (shouldCache) {
+        setProgressLabel('Saving history locally')
+        try {
+          await cacheHistoryFiles(files)
+          setCacheState('cached')
+        } catch (reason) {
+          setCacheState('session')
+          setError(reason instanceof Error ? reason.message : 'History loaded, but could not be cached locally.')
+        }
+      } else {
+        setCacheState('cached')
+      }
       setRowCount(result.rowCount)
       setBounds(result.bounds)
       const nextFilters: QueryFilters = {
@@ -95,9 +134,31 @@ function App() {
     }
   }
 
-  const rangeLabel = filters.startDate && filters.endDate
-    ? `${filters.startDate} to ${filters.endDate}`
-    : 'Selected Period'
+  async function clearCache() {
+    try {
+      await clearCachedHistory()
+      setCacheState('session')
+      return true
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The local history cache could not be cleared.')
+      return false
+    }
+  }
+
+  async function replaceFiles() {
+    if (!await clearCache()) return
+    setBounds(null)
+    setTracks([])
+    setTotalTracks(0)
+    setArtwork({})
+    setRowCount(0)
+    setActiveView('overview')
+  }
+
+  function exploreRange(startDate: string, endDate: string) {
+    setActiveView('overview')
+    void updateFilters({ ...filters, startDate, endDate, page: 1 })
+  }
 
   function toggleTheme() {
     const nextTheme = theme === 'light' ? 'dark' : 'light'
@@ -127,17 +188,36 @@ function App() {
       </header>
 
       <div className="workspace">
-        {!bounds ? (
+        {restoring ? (
+          <section className="restore-panel" aria-live="polite">
+            <LoaderCircle className="restore-spinner" size={30} />
+            <span className="kicker">LOCAL CACHE</span>
+            <h2>Restoring your history…</h2>
+            <p>Rebuilding the private analytics database in this browser.</p>
+          </section>
+        ) : !bounds ? (
           <FileUpload busy={busy} progress={progress} progressLabel={progressLabel} onFiles={(files) => void ingest(files)} />
         ) : (
           <>
             <div className="dataset-banner">
               <span><strong>{rowCount.toLocaleString()}</strong> plays indexed</span>
               <span>{bounds.min} → {bounds.max}</span>
-              <button onClick={() => { setBounds(null); setTracks([]); setTotalTracks(0); setSpotifyTrackUris([]); setArtwork({}); setRowCount(0) }}><RotateCcw size={14} /> Replace files</button>
-              <PlaylistButton trackUris={spotifyTrackUris} totalTracks={totalTracks} rangeLabel={rangeLabel} authReady={authReady} />
+              <span className={`cache-status ${cacheState === 'cached' ? 'is-cached' : ''}`}><HardDrive size={14} /> {cacheState === 'cached' ? 'Cached locally' : 'Session only'}</span>
+              <div className="dataset-actions">
+                {cacheState === 'cached' && <button onClick={() => void clearCache()}><Trash2 size={14} /> Clear cache</button>}
+                <button onClick={() => void replaceFiles()}><RotateCcw size={14} /> Replace files</button>
+                <PlaylistButton bounds={bounds} authReady={authReady} />
+              </div>
             </div>
-            <Dashboard bounds={bounds} filters={filters} tracks={tracks} totalTracks={totalTracks} artwork={artwork} loading={querying} onChange={(nextFilters) => void updateFilters(nextFilters)} />
+            <div className="view-switch segmented" aria-label="Dashboard section">
+              <button className={activeView === 'overview' ? 'active' : ''} onClick={() => setActiveView('overview')}><ListMusic size={15} /> Overview</button>
+              <button className={activeView === 'insights' ? 'active' : ''} onClick={() => setActiveView('insights')}><BarChart3 size={15} /> Insights</button>
+            </div>
+            {activeView === 'overview' ? (
+              <Dashboard bounds={bounds} filters={filters} tracks={tracks} totalTracks={totalTracks} artwork={artwork} loading={querying} onChange={(nextFilters) => void updateFilters(nextFilters)} />
+            ) : (
+              <Insights bounds={bounds} authReady={authReady} onExploreRange={exploreRange} />
+            )}
           </>
         )}
         {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}

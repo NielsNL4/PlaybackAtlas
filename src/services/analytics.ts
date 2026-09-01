@@ -1,4 +1,4 @@
-import type { AnalyticsResult, IngestResult, QueryFilters } from '../types'
+import type { AnalyticsResult, IngestResult, InsightQuery, InsightResult, PlaylistRankingRequest, PlaylistRankingResult, QueryFilters } from '../types'
 
 type ProgressCallback = (progress: number, label: string) => void
 
@@ -62,6 +62,14 @@ class AnalyticsService {
 
   query(filters: QueryFilters) {
     return this.request<AnalyticsResult>({ type: 'query', filters })
+  }
+
+  queryPlaylist(request: PlaylistRankingRequest) {
+    return this.request<PlaylistRankingResult>({ type: 'playlist', request })
+  }
+
+  queryInsights(request: InsightQuery) {
+    return this.request<InsightResult>({ type: 'insights', request })
   }
 }
 

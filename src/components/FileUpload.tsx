@@ -21,7 +21,7 @@ export function FileUpload({ busy, progress, progressLabel, onFiles }: FileUploa
     <section className="upload-panel" aria-labelledby="upload-title">
       <div className="eyebrow"><ShieldCheck size={14} /> Local processing only</div>
       <h2 id="upload-title">Drop your listening archive.</h2>
-      <p>Your files stay in this tab. Nothing is uploaded to a server.</p>
+      <p>Your files stay in this browser. Nothing is uploaded to a server.</p>
 
       <button
         type="button"

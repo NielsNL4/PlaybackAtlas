@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
   return {
     base: env.VITE_BASE_PATH || '/',
     plugins: [react(), tailwindcss()],
+    server: { allowedHosts: ['.loca.lt'] },
     worker: { format: 'es' },
     optimizeDeps: { exclude: ['@duckdb/duckdb-wasm'] },
   }

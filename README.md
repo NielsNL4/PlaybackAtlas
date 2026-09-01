@@ -1,6 +1,6 @@
 # Playback Atlas
 
-A zero-backend Spotify listening-history analyzer. Spotify export JSON is read into DuckDB-WASM and queried entirely in browser workers. Users can rank tracks by play count or listening time, choose a date range, and export the current chart to their Spotify account.
+A zero-backend Spotify listening-history analyzer. Spotify export JSON is read into DuckDB-WASM and queried entirely in browser workers. Users can rank tracks by play count or listening time, explore custom date ranges, and independently generate yearly or monthly Spotify playlists.
 
 ## Architecture
 
@@ -66,6 +66,24 @@ Request **Extended streaming history** from Spotify's account privacy/download p
 
 The default 30-second minimum excludes likely skips. Change it to include shorter plays. Playlist export ignores null URIs, podcast episodes, local files, and duplicate track URIs.
 
+After a valid import, the original JSON files are cached in browser IndexedDB. This lets the app rebuild its in-memory DuckDB tables automatically after a reload or Spotify OAuth redirect. Use **Clear cache** to keep the current session but remove the persisted files, or **Replace files** to remove them and return to the uploader. The cache is never sent to the application or any other server.
+
+Playlist generation has its own filters and does not use the overview's date range or ranking metric. The playlist workshop supports a selected year's Top 50, 100, 250, or 500 tracks, or separate Top 50 playlists for any selected months across multiple years. Monthly playlists use names such as `2025 — January`. Spotify's Web API cannot create playlist folders, so the year prefix keeps monthly sets grouped when sorted by name.
+
+## Insights
+
+The independent **Insights** tab aggregates chart data in the DuckDB worker and defaults to the full archive. It includes:
+
+- Summary totals for plays, listening time, unique tracks, and unique artists
+- Listening volume with day, week, and month grouping plus plays/time toggles
+- A browser-local weekday/hour activity heatmap
+- First-ever track plays versus repeat listening
+- Top 10 artist share, rank, and total views
+- Linked timeline selections that open the matching overview ranking
+- CSV and JSON exports of the current Insights result
+
+Core Insights work without Spotify authentication. When Spotify is connected, the app optionally enriches the top 100 tracks in the selected Insights range with artist genres, track duration, popularity, and release era. Up to 500 enriched track records are cached in local browser storage to reduce repeated Spotify API requests.
+
 ## Generate Realistic Test History
 
 The local generator fetches real track names, artists, albums, durations, and playable `spotify:track:` URIs from Spotify. It wraps them in synthetic Extended Streaming History records spread evenly across a calendar year. Timestamps and playback behavior are synthetic; the catalog metadata is real.
@@ -124,7 +142,8 @@ npm run generate:test-history -- --year 2025
 
 ## Privacy and Limits
 
-- History files and query results remain in the tab's memory and are discarded on reload.
+- Imported history files persist locally in browser IndexedDB until **Clear cache** or **Replace files** is used. DuckDB tables and query results remain in memory and are rebuilt locally after reload.
 - Visible Spotify track IDs are sent to Spotify's public oEmbed endpoint to retrieve album artwork. Playlist data and authenticated API requests are sent only when the user connects.
+- Spotify-enriched Insights metadata is cached locally in the browser and can be removed by clearing site data.
 - Tokens in browser storage are accessible to JavaScript on this origin. The app avoids third-party runtime scripts, but normal client-side security practices and dependency review still apply.
 - DuckDB's WASM binary is about 40 MB uncompressed and is cached by the browser after first load.
