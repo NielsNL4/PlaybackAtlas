@@ -68,7 +68,9 @@ export function PlaylistButton({ trackUris, totalTracks, rangeLabel, authReady }
                 <h2 id="playlist-title">Turn the chart into a playlist.</h2>
                 <p>{eligible.length} of {totalTracks} ranked tracks have a valid Spotify URI.</p>
                 {!session ? (
-                  <button className="primary-action" onClick={() => void connectSpotify()}>Connect Spotify</button>
+                  <div className="connect-area">
+                    <button className="connect-button" onClick={() => void connectSpotify()}>Connect Spotify</button>
+                  </div>
                 ) : (
                   <>
                     <div className="account-row">

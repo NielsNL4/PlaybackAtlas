@@ -17,6 +17,7 @@
   --surface-hover: #fff;
   --muted: #686a65;
   --input-line: #aaa79e;
+  --input-bg: #f8f5ee;
   --modal-shade: #181b19cc;
   color-scheme: light;
 }
@@ -33,6 +34,7 @@
   --surface-hover: #2d2f31;
   --muted: #a4a79f;
   --input-line: #5d6064;
+  --input-bg: #292b2d;
   --modal-shade: #0e0f10dd;
   color-scheme: dark;
 }
@@ -94,7 +96,9 @@ html, body, .topbar, .hero, .workspace, footer, .dashboard, .modal, .drop-zone, 
 .segmented button { flex: 1; border: 0; padding: 8px 9px; background: transparent; cursor: pointer; font: 500 10px 'DM Mono'; text-transform: uppercase; }
 .segmented button.active { background: var(--ink); color: var(--paper); }
 .range-tabs { margin-bottom: 13px; }
-.control-rail select, .control-rail input { width: 100%; border: 1px solid var(--input-line); border-radius: 0; background: transparent; color: var(--ink); padding: 10px; margin-bottom: 14px; font: 400 11px 'DM Mono'; }
+.control-rail select, .control-rail input { width: 100%; border: 1px solid var(--input-line); border-radius: 0; background: var(--input-bg); color: var(--ink); padding: 10px; margin-bottom: 14px; font: 400 11px 'DM Mono'; }
+.control-rail select option { background: var(--input-bg); color: var(--ink); }
+.control-rail select:focus, .control-rail input:focus { border-color: var(--acid); outline: 2px solid color-mix(in srgb, var(--acid) 45%, transparent); outline-offset: 1px; }
 .date-pair label { font: 500 9px 'DM Mono'; text-transform: uppercase; }
 .date-pair input { margin-top: 5px; }
 .rule { border-top: 1px solid var(--line); margin: 13px 0 22px; }
@@ -138,7 +142,11 @@ html, body, .topbar, .hero, .workspace, footer, .dashboard, .modal, .drop-zone, 
 .modal p { color: var(--muted); line-height: 1.6; font-size: 13px; }
 .icon-button { border: 0; background: transparent; cursor: pointer; padding: 5px; }
 .modal .close { position: absolute; top: 15px; right: 15px; }
-.primary-action { width: 100%; min-height: 46px; border: 1px solid var(--ink); background: var(--acid); color: #181b19; display: flex; align-items: center; justify-content: center; gap: 7px; font-weight: 700; text-decoration: none; cursor: pointer; margin-top: 20px; }
+.primary-action { width: 100%; min-height: 46px; border: 1px solid #181b19; border-radius: 0; background: var(--acid); color: #181b19; -webkit-text-fill-color: #181b19; display: flex; align-items: center; justify-content: center; gap: 7px; font-weight: 700; text-decoration: none; cursor: pointer; margin-top: 20px; }
+.modal button.primary-action:hover, .modal a.primary-action:hover { background: color-mix(in srgb, var(--acid) 84%, white); }
+.connect-area { min-height: 100px; display: grid; place-items: center; }
+.modal .connect-button { display: block; width: auto; min-height: 0; margin: 0; border: 1px solid var(--ink); border-radius: 0; background: var(--acid); color: #181b19; -webkit-text-fill-color: #181b19; padding: 10px 14px; cursor: pointer; font: 500 10px/1.45 'DM Mono'; text-transform: uppercase; letter-spacing: .04em; }
+.modal .connect-button:hover { background: var(--acid); transform: rotate(-1deg); }
 .primary-action:disabled { opacity: .45; cursor: not-allowed; }
 .account-row { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 13px 0; margin: 22px 0 16px; display: flex; justify-content: space-between; font-size: 12px; }
 .account-row button { border: 0; background: none; display: flex; align-items: center; gap: 4px; font: 400 9px 'DM Mono'; cursor: pointer; }
