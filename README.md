@@ -1,6 +1,6 @@
 # Playback Atlas
 
-A zero-backend Spotify listening-history analyzer. Spotify export JSON is read into DuckDB-WASM and queried entirely in browser workers. Users can rank tracks by play count or listening time, explore custom date ranges, and independently generate yearly or monthly Spotify playlists.
+A zero-backend Spotify listening-history analyzer. Spotify export JSON is read into DuckDB-WASM and queried entirely in browser workers. Users can rank tracks or artists by play count or listening time, explore custom date ranges, and independently generate yearly or monthly Spotify playlists.
 
 ## Architecture
 
@@ -58,13 +58,15 @@ Playlist export is optional. History ingestion and analytics work without Spotif
 4. Set `VITE_SPOTIFY_REDIRECT_URI=http://127.0.0.1:5174/` in `.env.local`. The value must match the dashboard entry exactly, including the trailing slash.
 5. Add your Spotify account under the app's user access settings if the app remains in development mode.
 
-The app requests only `playlist-modify-public playlist-modify-private`. The PKCE verifier and OAuth state are generated with Web Crypto. The access/refresh token is retained in browser storage with its expiration time and refreshed directly against Spotify when necessary. Disconnecting removes the stored token.
+The app requests `playlist-modify-public`, `playlist-modify-private`, `user-top-read`, and `user-read-recently-played`. Playlist scopes are used only for exports; the read scopes power the optional Spotify Taste Profile in Insights. The PKCE verifier and OAuth state are generated with Web Crypto. The access/refresh token and granted scopes are retained in browser storage and refreshed directly against Spotify when necessary. Disconnecting removes the stored token.
 
 ## Spotify Export Data
 
 Request **Extended streaming history** from Spotify's account privacy/download page. Select all relevant `Streaming_History_Audio_*.json` or `endsong_*.json` files at once. Processing large archives can take time, but parsing and SQL execution occur off the UI thread.
 
-The default 30-second minimum excludes likely skips. Change it to include shorter plays. Playlist export ignores null URIs, podcast episodes, local files, and duplicate track URIs.
+The 30-second minimum excludes likely skips and accidental presses. Playlist export ignores null URIs, podcast episodes, local files, and duplicate track URIs.
+
+The Overview chart can switch between track and artist rankings while preserving its date, minimum-play, metric, and pagination filters. Artist totals are calculated locally from the archive. When Spotify is connected and the archive contains track URIs, the current page is optionally enhanced with linked Spotify artist profile images; otherwise local placeholders are shown.
 
 After a valid import, the original JSON files are cached in browser IndexedDB. This lets the app rebuild its in-memory DuckDB tables automatically after a reload or Spotify OAuth redirect. Use **Clear cache** to keep the current session but remove the persisted files, or **Replace files** to remove them and return to the uploader. The cache is never sent to the application or any other server.
 
@@ -82,7 +84,7 @@ The independent **Insights** tab aggregates chart data in the DuckDB worker and 
 - Linked timeline selections that open the matching overview ranking
 - CSV and JSON exports of the current Insights result
 
-Core Insights work without Spotify authentication. When Spotify is connected, the app optionally enriches the top 100 tracks in the selected Insights range with artist genres, track duration, popularity, and release era. Up to 500 enriched track records are cached in local browser storage to reduce repeated Spotify API requests.
+Core Insights work without Spotify authentication. When Spotify is connected, the optional Spotify Taste Profile compares short-, medium-, and long-term top artists and tracks; summarizes recent plays and listening contexts; and measures overlap with the selected archive range. Where Spotify makes audio features available, it also compares current energy, danceability, valence, acousticness, instrumentalness, speechiness, and tempo with the long-term baseline. Spotify affinity requests are cached for the browser session to avoid repeated API calls when archive filters change. Spotify only exposes up to 50 recent plays through this API, so the imported archive remains the source of historical analysis.
 
 ## Generate Realistic Test History
 
