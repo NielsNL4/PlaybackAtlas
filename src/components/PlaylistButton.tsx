@@ -243,8 +243,6 @@ export function PlaylistButton({ bounds, authReady }: PlaylistButtonProps) {
                 <div className="playlist-footer-options">
                   <label className="playlist-field">Minimum play
                     <select value={minMs} onChange={(event) => setMinMs(Number(event.target.value))}>
-                      <option value={0}>No minimum</option>
-                      <option value={10000}>10 seconds</option>
                       <option value={30000}>30 seconds</option>
                       <option value={60000}>1 minute</option>
                     </select>
@@ -261,7 +259,7 @@ export function PlaylistButton({ bounds, authReady }: PlaylistButtonProps) {
                     <span className="progress-track"><span style={{ width: `${progressPercent}%` }} /></span>
                   </div>
                 )}
-                <button className="primary-action" disabled={creating || (mode === 'months' && !monthlySelectionValid)} onClick={() => void submit()}>
+                <button className="primary-action playlist-submit" disabled={creating || (mode === 'months' && !monthlySelectionValid)} onClick={() => void submit()}>
                   {creating ? 'Creating playlists…' : mode === 'year' ? `Create ${year} — Top ${size}` : `Create ${selectedYears.length * selectedMonths.length} monthly playlists`}
                 </button>
               </>

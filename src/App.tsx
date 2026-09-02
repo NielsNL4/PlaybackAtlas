@@ -6,8 +6,8 @@ import { Insights } from './components/Insights'
 import { PlaylistButton } from './components/PlaylistButton'
 import { analytics } from './services/analytics'
 import { cacheHistoryFiles, clearCachedHistory, getCachedHistoryFiles } from './services/historyCache'
-import { getTrackArtwork, handleSpotifyCallback } from './services/spotify'
-import type { DateBounds, QueryFilters, TrackResult } from './types'
+import { getArtistProfiles, getTrackArtwork, handleSpotifyCallback, type SpotifyArtistProfile } from './services/spotify'
+import type { ArtistResult, DateBounds, QueryFilters, TrackResult } from './types'
 
 const defaultFilters: QueryFilters = {
   startDate: '',
@@ -15,6 +15,7 @@ const defaultFilters: QueryFilters = {
   minMs: 30_000,
   metric: 'plays',
   page: 1,
+  ranking: 'tracks',
 }
 
 function App() {
@@ -24,8 +25,10 @@ function App() {
   const [bounds, setBounds] = useState<DateBounds | null>(null)
   const [filters, setFilters] = useState(defaultFilters)
   const [tracks, setTracks] = useState<TrackResult[]>([])
-  const [totalTracks, setTotalTracks] = useState(0)
+  const [artists, setArtists] = useState<ArtistResult[]>([])
+  const [totalResults, setTotalResults] = useState(0)
   const [artwork, setArtwork] = useState<Record<string, string>>({})
+  const [artistProfiles, setArtistProfiles] = useState<Record<string, SpotifyArtistProfile>>({})
   const [rowCount, setRowCount] = useState(0)
   const [busy, setBusy] = useState(false)
   const [querying, setQuerying] = useState(false)
@@ -39,6 +42,7 @@ function App() {
   const callbackStarted = useRef(false)
   const restoreStarted = useRef(false)
   const querySequence = useRef(0)
+  const artistProfileRequest = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (callbackStarted.current) return
@@ -72,6 +76,8 @@ function App() {
   }, [])
 
   async function updateFilters(nextFilters: QueryFilters) {
+    artistProfileRequest.current?.abort()
+    artistProfileRequest.current = null
     const sequence = ++querySequence.current
     setFilters(nextFilters)
     setQuerying(true)
@@ -79,15 +85,46 @@ function App() {
       const result = await analytics.query(nextFilters)
       if (sequence === querySequence.current) {
         setTracks(result.tracks)
-        setTotalTracks(result.totalTracks)
-        const pageUris = result.tracks.flatMap((track) => track.spotifyTrackUri ? [track.spotifyTrackUri] : [])
-        void getTrackArtwork(pageUris)
-          .then((images) => {
-            if (sequence === querySequence.current) {
+        setArtists(result.artists)
+        setTotalResults(result.totalResults)
+        if (nextFilters.ranking === 'tracks') {
+          const pageUris = result.tracks.flatMap((track) => track.spotifyTrackUri ? [track.spotifyTrackUri] : [])
+          void (async () => {
+            try {
+              const images = await getTrackArtwork(pageUris)
+              if (sequence !== querySequence.current) return
               setArtwork((current) => ({ ...current, ...images }))
+
+              if (nextFilters.page * 50 >= result.totalResults) return
+              const prefetched = await analytics.query({ ...nextFilters, page: nextFilters.page + 1 })
+              if (sequence !== querySequence.current) return
+              const nextPageUris = prefetched.tracks.flatMap((track) => track.spotifyTrackUri ? [track.spotifyTrackUri] : [])
+              const nextImages = await getTrackArtwork(nextPageUris)
+              if (sequence === querySequence.current) {
+                setArtwork((current) => ({ ...current, ...nextImages }))
+                Object.values(nextImages).forEach((src) => {
+                  const image = new Image()
+                  image.src = src
+                })
+              }
+            } catch {
+              // Artwork prefetching is optional and must not block local rankings.
             }
-          })
-          .catch(() => undefined)
+          })()
+        } else {
+          const unresolvedArtists = result.artists.filter((artist) => !artistProfiles[artist.artistName])
+          const controller = new AbortController()
+          artistProfileRequest.current = controller
+          void getArtistProfiles(unresolvedArtists, (artistName, profile) => {
+            if (sequence === querySequence.current) {
+              setArtistProfiles((current) => ({ ...current, [artistName]: profile }))
+            }
+          }, controller.signal)
+            .then((profiles) => {
+              if (sequence === querySequence.current) setArtistProfiles((current) => ({ ...current, ...profiles }))
+            })
+            .catch(() => undefined)
+        }
       }
     } catch (reason) {
       if (sequence === querySequence.current) {
@@ -149,15 +186,17 @@ function App() {
     if (!await clearCache()) return
     setBounds(null)
     setTracks([])
-    setTotalTracks(0)
+    setArtists([])
+    setTotalResults(0)
     setArtwork({})
+    setArtistProfiles({})
     setRowCount(0)
     setActiveView('overview')
   }
 
   function exploreRange(startDate: string, endDate: string) {
     setActiveView('overview')
-    void updateFilters({ ...filters, startDate, endDate, page: 1 })
+    void updateFilters({ ...filters, startDate, endDate, page: 1, ranking: 'tracks' })
   }
 
   function toggleTheme() {
@@ -214,7 +253,7 @@ function App() {
               <button className={activeView === 'insights' ? 'active' : ''} onClick={() => setActiveView('insights')}><BarChart3 size={15} /> Insights</button>
             </div>
             {activeView === 'overview' ? (
-              <Dashboard bounds={bounds} filters={filters} tracks={tracks} totalTracks={totalTracks} artwork={artwork} loading={querying} onChange={(nextFilters) => void updateFilters(nextFilters)} />
+              <Dashboard bounds={bounds} filters={filters} tracks={tracks} artists={artists} totalResults={totalResults} artwork={artwork} artistProfiles={artistProfiles} loading={querying} onChange={(nextFilters) => void updateFilters(nextFilters)} />
             ) : (
               <Insights bounds={bounds} authReady={authReady} onExploreRange={exploreRange} />
             )}

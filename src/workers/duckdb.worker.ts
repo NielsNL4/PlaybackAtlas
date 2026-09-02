@@ -166,7 +166,7 @@ async function queryTracks(filters: QueryFilters): Promise<AnalyticsResult> {
   const orderBy = filters.metric === 'plays' ? 'play_count' : 'total_ms'
   const startDate = sqlDate(filters.startDate)
   const endDate = sqlDate(filters.endDate)
-  const minMs = sqlInteger(filters.minMs, 0, 86_400_000, 'minimum playback duration')
+  const minMs = sqlInteger(filters.minMs, 30_000, 86_400_000, 'minimum playback duration')
   const pageNumber = sqlInteger(filters.page, 1, 1_000_000, 'page')
   await conn.query(`
     CREATE OR REPLACE TEMP TABLE ranked_tracks AS
@@ -205,12 +205,59 @@ async function queryTracks(filters: QueryFilters): Promise<AnalyticsResult> {
       playCount: Number(row.play_count),
       totalMs: Number(row.total_ms),
     })),
-    totalTracks: Number(summary.toArray()[0].total_tracks),
+    artists: [],
+    totalResults: Number(summary.toArray()[0].total_tracks),
+  }
+}
+
+async function queryArtists(filters: QueryFilters): Promise<AnalyticsResult> {
+  const conn = await getConnection()
+  const orderBy = filters.metric === 'plays' ? 'play_count' : 'total_ms'
+  const startDate = sqlDate(filters.startDate)
+  const endDate = sqlDate(filters.endDate)
+  const minMs = sqlInteger(filters.minMs, 30_000, 86_400_000, 'minimum playback duration')
+  const pageNumber = sqlInteger(filters.page, 1, 1_000_000, 'page')
+  await conn.query(`
+    CREATE OR REPLACE TEMP TABLE ranked_artists AS
+    WITH aggregated AS (
+      SELECT
+        artist_name,
+        count(DISTINCT coalesce(spotify_track_uri, artist_name || chr(0) || track_name))::DOUBLE AS unique_tracks,
+        count(*)::DOUBLE AS play_count,
+        sum(ms_played)::DOUBLE AS total_ms
+      FROM listening_history
+      WHERE played_at >= try_cast(${startDate} AS DATE)
+        AND played_at < try_cast(${endDate} AS DATE) + INTERVAL 1 DAY
+        AND ms_played >= ${minMs}
+      GROUP BY artist_name
+    )
+    SELECT
+      row_number() OVER (ORDER BY ${orderBy} DESC, artist_name ASC)::DOUBLE AS rank,
+      *
+    FROM aggregated;
+  `)
+
+  const offset = (pageNumber - 1) * 50
+  const page = await conn.query(
+    `SELECT * FROM ranked_artists WHERE rank > ${offset} AND rank <= ${offset + 50} ORDER BY rank;`,
+  )
+  const summary = await conn.query('SELECT count(*)::DOUBLE AS total_artists FROM ranked_artists;')
+  return {
+    tracks: [],
+    artists: page.toArray().map((row) => ({
+      rank: Number(row.rank),
+      artistName: String(row.artist_name),
+      uniqueTracks: Number(row.unique_tracks),
+      playCount: Number(row.play_count),
+      totalMs: Number(row.total_ms),
+    })),
+    totalResults: Number(summary.toArray()[0].total_artists),
   }
 }
 
 async function queryPlaylist(request: PlaylistRankingRequest): Promise<PlaylistRankingResult> {
   const conn = await getConnection()
+  const minMs = sqlInteger(request.minMs, 30_000, 86_400_000, 'minimum playback duration')
   const statement = await conn.prepare(`
     SELECT spotify_track_uri
     FROM listening_history
@@ -227,7 +274,7 @@ async function queryPlaylist(request: PlaylistRankingRequest): Promise<PlaylistR
     const result = await statement.query(
       request.startDate,
       request.endDate,
-      request.minMs,
+      minMs,
       request.limit,
     )
     return { spotifyTrackUris: result.toArray().map((row) => String(row.spotify_track_uri)) }
@@ -244,7 +291,7 @@ async function queryInsights(request: InsightQuery): Promise<InsightResult> {
   const metricOrder = request.metric === 'duration' ? 'total_ms' : 'plays'
   const startDate = sqlDate(request.startDate)
   const endDate = sqlDate(request.endDate)
-  const minMs = sqlInteger(request.minMs, 0, 86_400_000, 'minimum playback duration')
+  const minMs = sqlInteger(request.minMs, 30_000, 86_400_000, 'minimum playback duration')
   const timezoneOffset = sqlInteger(request.timezoneOffsetMinutes, -1_440, 1_440, 'timezone offset')
   await conn.query(`
     CREATE OR REPLACE TEMP TABLE insight_events AS
@@ -394,7 +441,9 @@ async function handleRequest(data: WorkerRequest) {
   try {
     let result: IngestResult | AnalyticsResult | PlaylistRankingResult | InsightResult
     if (data.type === 'ingest') result = await ingest(data.id, data.files)
-    else if (data.type === 'query') result = await queryTracks(data.filters)
+    else if (data.type === 'query') result = data.filters.ranking === 'artists'
+      ? await queryArtists(data.filters)
+      : await queryTracks(data.filters)
     else if (data.type === 'playlist') result = await queryPlaylist(data.request)
     else result = await queryInsights(data.request)
     post({ id: data.id, type: 'result', result })

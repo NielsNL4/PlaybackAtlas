@@ -1,7 +1,8 @@
 import { BarChart3, Clock3, Download, ExternalLink, Headphones, Music, Sparkles, Users } from 'lucide-react'
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { analytics } from '../services/analytics'
-import { connectSpotify, getInsightEnrichment, getSpotifySession, type InsightEnrichment } from '../services/spotify'
+import { interactiveReportHtml } from '../services/report'
+import { connectSpotify, getInsightEnrichment, getSpotifySession, type InsightEnrichment, type SpotifySession } from '../services/spotify'
 import type {
   DateBounds,
   InsightDiscoveryPoint,
@@ -99,16 +100,17 @@ function VolumeChart({
   }))
   const line = points.map((point) => `${point.x},${point.y}`).join(' ')
   const area = `${padding.left},${height - padding.bottom} ${line} ${points.at(-1)?.x || padding.left},${height - padding.bottom}`
-  const detail = selected || hovered
+  const detail = hovered || selected
+  const showingSelected = Boolean(selected && detail?.period === selected.period)
 
   return (
     <div className="chart-stage">
       {detail && (
-        <div className={`chart-tooltip ${selected ? 'is-selected' : ''}`}>
+        <div className={`chart-tooltip ${showingSelected ? 'is-selected' : ''}`}>
           <strong>{detail.period}</strong>
           <span>{formatMetric(metricValue(detail, metric), metric)}</span>
-          {selected && <small>{detail.uniqueTracks.toLocaleString()} tracks · {detail.uniqueArtists.toLocaleString()} artists</small>}
-          {selected && <button onClick={() => onExploreRange(detail.period, periodEnd(detail.period, granularity, endDate))}>View ranked tracks <ExternalLink size={12} /></button>}
+          {showingSelected && <small>{detail.uniqueTracks.toLocaleString()} tracks · {detail.uniqueArtists.toLocaleString()} artists</small>}
+          {showingSelected && <button onClick={() => onExploreRange(detail.period, periodEnd(detail.period, granularity, endDate))}>View ranked tracks <ExternalLink size={12} /></button>}
         </div>
       )}
       <svg className="insight-svg volume-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Listening volume over time">
@@ -118,6 +120,32 @@ function VolumeChart({
         })}
         <polygon points={area} className="volume-area" />
         <polyline points={line} className="volume-line" />
+        {hovered && (
+          <line
+            x1={points.find((point) => point.item.period === hovered.period)?.x}
+            x2={points.find((point) => point.item.period === hovered.period)?.x}
+            y1={padding.top}
+            y2={height - padding.bottom}
+            className="volume-hover-line"
+          />
+        )}
+        {points.map(({ item, x }, index) => {
+          const start = index === 0 ? padding.left : (points[index - 1].x + x) / 2
+          const end = index === points.length - 1 ? width - padding.right : (x + points[index + 1].x) / 2
+          return (
+            <rect
+              key={`hover-${item.period}`}
+              x={start}
+              y={padding.top}
+              width={end - start}
+              height={height - padding.top - padding.bottom}
+              className="volume-hover-band"
+              onMouseEnter={() => setHovered(item)}
+              onMouseLeave={() => setHovered(null)}
+              onClick={() => setSelected(selected?.period === item.period ? null : item)}
+            />
+          )
+        })}
         {points.map(({ item, x, y }) => (
           <circle
             key={item.period}
@@ -190,15 +218,27 @@ function DiscoveryChart({
   endDate: string
   onExploreRange: (start: string, end: string) => void
 }) {
-  const [selected, setSelected] = useState<InsightDiscoveryPoint | null>(null)
+  const [hovered, setHovered] = useState<InsightDiscoveryPoint | null>(null)
   const maximum = Math.max(...data.map((item) => item.firstPlays + item.repeatPlays), 1)
   return (
-    <div className="discovery-chart">
+    <div
+      className="discovery-chart"
+      onMouseLeave={() => setHovered(null)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setHovered(null)
+      }}
+    >
       {data.map((item, index) => {
         const total = item.firstPlays + item.repeatPlays
         return (
-          <button key={item.period} className={selected?.period === item.period ? 'selected' : ''} onClick={() => setSelected(selected?.period === item.period ? null : item)}>
-            <span className="discovery-bars" style={{ height: `${Math.max(4, (total / maximum) * 180)}px` }}>
+          <button
+            key={item.period}
+            className={hovered?.period === item.period ? 'is-hovered' : ''}
+            aria-label={`${item.period}, ${item.firstPlays} first-ever plays and ${item.repeatPlays} repeats`}
+            onMouseEnter={() => setHovered(item)}
+            onFocus={() => setHovered(item)}
+          >
+            <span className="discovery-bars" style={{ height: `${Math.max(5, (total / maximum) * 225)}px` }}>
               <span className="repeat-segment" style={{ height: `${total ? (item.repeatPlays / total) * 100 : 0}%` }} />
               <span className="first-segment" style={{ height: `${total ? (item.firstPlays / total) * 100 : 0}%` }} />
             </span>
@@ -206,34 +246,65 @@ function DiscoveryChart({
           </button>
         )
       })}
-      {selected && (
+      {hovered && (
         <div className="discovery-detail">
-          <strong>{selected.period}</strong>
-          <span>{selected.firstPlays.toLocaleString()} first-ever plays · {selected.repeatPlays.toLocaleString()} repeats</span>
-          <button onClick={() => onExploreRange(selected.period, periodEnd(selected.period, granularity, endDate))}>View ranked tracks <ExternalLink size={12} /></button>
+          <strong>{hovered.period}</strong>
+          <span>{hovered.firstPlays.toLocaleString()} first-ever plays · {hovered.repeatPlays.toLocaleString()} repeats</span>
+          <button onClick={() => onExploreRange(hovered.period, periodEnd(hovered.period, granularity, endDate))}>View ranked tracks <ExternalLink size={12} /></button>
         </div>
       )}
     </div>
   )
 }
 
-function ArtistChart({ result, metric, view }: { result: InsightResult; metric: RankingMetric; view: ArtistView }) {
+function ArtistChart({ result, metric, view, granularity }: { result: InsightResult; metric: RankingMetric; view: ArtistView; granularity: InsightGranularity }) {
+  const [hoveredArtist, setHoveredArtist] = useState<string | null>(null)
+  const [pinnedArtist, setPinnedArtist] = useState<string | null>(null)
   const artists = result.artistTotals.map((item) => item.artistName)
   const periods = result.volume.map((item) => item.period)
   const lookup = new Map(result.artistTrends.map((item) => [`${item.period}::${item.artistName}`, item]))
+  const activeArtist = [hoveredArtist, pinnedArtist].find((artist) => artist && artists.includes(artist)) || null
+  const activeTotal = result.artistTotals.find((item) => item.artistName === activeArtist)
+
+  function clearHover(artist: string) {
+    setHoveredArtist((current) => current === artist ? null : current)
+  }
+
+  function togglePin(artist: string) {
+    setPinnedArtist((current) => current === artist ? null : artist)
+  }
+
+  const activeDetail = activeArtist && activeTotal && (
+    <div className="artist-active-detail">
+      <i style={{ background: ARTIST_COLORS[artists.indexOf(activeArtist)] }} />
+      <span><strong>{activeArtist}</strong><small>{formatMetric(metricValue(activeTotal, metric), metric)}{pinnedArtist === activeArtist ? ' · pinned' : ''}</small></span>
+    </div>
+  )
 
   if (view === 'bars') {
     const maximum = Math.max(...result.artistTotals.map((item) => metricValue(item, metric)), 1)
     return (
-      <div className="artist-bars">
+      <div className="artist-bars-wrap">
+        {activeDetail}
+        <div className="artist-bars">
         {result.artistTotals.map((artist, index) => (
-          <div className="artist-bar-row" key={artist.artistName}>
+          <button
+            className={`artist-bar-row ${activeArtist && activeArtist !== artist.artistName ? 'is-dimmed' : ''} ${pinnedArtist === artist.artistName ? 'is-pinned' : ''}`}
+            key={artist.artistName}
+            onMouseEnter={() => setHoveredArtist(artist.artistName)}
+            onMouseLeave={() => clearHover(artist.artistName)}
+            onFocus={() => setHoveredArtist(artist.artistName)}
+            onBlur={() => clearHover(artist.artistName)}
+            onClick={() => togglePin(artist.artistName)}
+            aria-pressed={pinnedArtist === artist.artistName}
+          >
             <span className="artist-rank">{String(index + 1).padStart(2, '0')}</span>
             <strong>{artist.artistName}</strong>
             <span className="artist-bar-track"><span style={{ width: `${(metricValue(artist, metric) / maximum) * 100}%`, background: ARTIST_COLORS[index] }} /></span>
             <small>{formatMetric(metricValue(artist, metric), metric)}</small>
-          </div>
+          </button>
         ))}
+        </div>
       </div>
     )
   }
@@ -245,10 +316,14 @@ function ArtistChart({ result, metric, view }: { result: InsightResult; metric: 
   const top = 20
   const bottom = 35
   const x = (index: number) => left + (index / Math.max(periods.length - 1, 1)) * (width - left - right)
+  const periodLabels = periods
+    .map((period, index) => ({ period, index }))
+    .filter(({ index }) => index % Math.max(1, Math.ceil(periods.length / 6)) === 0 || index === periods.length - 1)
 
   if (view === 'ranked') {
     return (
       <div className="artist-chart-wrap">
+        {activeDetail}
         <svg className="insight-svg artist-lines" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Artist rank over time">
           {Array.from({ length: 10 }, (_, index) => {
             const y = top + (index / 9) * (height - top - bottom)
@@ -259,10 +334,38 @@ function ArtistChart({ result, metric, view }: { result: InsightResult; metric: 
               const item = lookup.get(`${period}::${artist}`)
               return item ? [`${x(periodIndex)},${top + ((item.rank - 1) / 9) * (height - top - bottom)}`] : []
             })
-            return <polyline key={artist} points={points.join(' ')} fill="none" stroke={ARTIST_COLORS[artistIndex]} strokeWidth="3"><title>{artist}</title></polyline>
+            return (
+              <g
+                key={artist}
+                className={`artist-series ${activeArtist && activeArtist !== artist ? 'is-dimmed' : ''} ${pinnedArtist === artist ? 'is-pinned' : ''}`}
+                tabIndex={0}
+                role="button"
+                aria-label={`${artist}, click to pin`}
+                aria-pressed={pinnedArtist === artist}
+                onMouseEnter={() => setHoveredArtist(artist)}
+                onMouseLeave={() => clearHover(artist)}
+                onFocus={() => setHoveredArtist(artist)}
+                onBlur={() => clearHover(artist)}
+                onClick={() => togglePin(artist)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    togglePin(artist)
+                  }
+                }}
+              >
+                <polyline points={points.join(' ')} fill="none" stroke="transparent" strokeWidth="18" className="artist-series-hit" />
+                <polyline points={points.join(' ')} fill="none" stroke={ARTIST_COLORS[artistIndex]} strokeWidth={activeArtist === artist ? 5 : 3} className="artist-series-line"><title>{artist}</title></polyline>
+              </g>
+            )
           })}
+          {periodLabels.map(({ period, index }) => (
+            <text key={period} x={x(index)} y={height - 10} textAnchor="middle" className="chart-axis-label">
+              {granularity === 'month' ? period.slice(0, 7) : period}
+            </text>
+          ))}
         </svg>
-        <ArtistLegend artists={artists} />
+        <ArtistLegend artists={artists} activeArtist={activeArtist} pinnedArtist={pinnedArtist} onHover={setHoveredArtist} onLeave={clearHover} onPin={togglePin} />
       </div>
     )
   }
@@ -276,6 +379,7 @@ function ArtistChart({ result, metric, view }: { result: InsightResult; metric: 
 
   return (
     <div className="artist-chart-wrap">
+      {activeDetail}
       <svg className="insight-svg artist-areas" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Top artist listening share over time">
         {artists.map((artist, artistIndex) => {
           const lower = cumulative.map((value, index) => totals[index] ? value / totals[index] : 0)
@@ -289,16 +393,115 @@ function ArtistChart({ result, metric, view }: { result: InsightResult; metric: 
             ...upper.map((value, index) => `${x(index)},${top + (1 - value) * chartHeight}`),
             ...lower.map((value, index) => `${x(index)},${top + (1 - value) * chartHeight}`).reverse(),
           ].join(' ')
-          return <polygon key={artist} points={points} fill={ARTIST_COLORS[artistIndex]} opacity=".82"><title>{artist}</title></polygon>
+          return (
+            <polygon
+              key={artist}
+              points={points}
+              fill={ARTIST_COLORS[artistIndex]}
+              className={`artist-series artist-area ${activeArtist && activeArtist !== artist ? 'is-dimmed' : ''} ${pinnedArtist === artist ? 'is-pinned' : ''}`}
+              tabIndex={0}
+              role="button"
+              aria-label={`${artist}, click to pin`}
+              aria-pressed={pinnedArtist === artist}
+              onMouseEnter={() => setHoveredArtist(artist)}
+              onMouseLeave={() => clearHover(artist)}
+              onFocus={() => setHoveredArtist(artist)}
+              onBlur={() => clearHover(artist)}
+              onClick={() => togglePin(artist)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  togglePin(artist)
+                }
+              }}
+            ><title>{artist}</title></polygon>
+          )
         })}
+        {periodLabels.map(({ period, index }) => (
+          <text key={period} x={x(index)} y={height - 10} textAnchor="middle" className="chart-axis-label">
+            {granularity === 'month' ? period.slice(0, 7) : period}
+          </text>
+        ))}
       </svg>
-      <ArtistLegend artists={artists} />
+      <ArtistLegend artists={artists} activeArtist={activeArtist} pinnedArtist={pinnedArtist} onHover={setHoveredArtist} onLeave={clearHover} onPin={togglePin} />
     </div>
   )
 }
 
-function ArtistLegend({ artists }: { artists: string[] }) {
-  return <div className="artist-legend">{artists.map((artist, index) => <span key={artist}><i style={{ background: ARTIST_COLORS[index] }} />{artist}</span>)}</div>
+function ArtistLegend({
+  artists,
+  activeArtist,
+  pinnedArtist,
+  onHover,
+  onLeave,
+  onPin,
+}: {
+  artists: string[]
+  activeArtist: string | null
+  pinnedArtist: string | null
+  onHover: (artist: string) => void
+  onLeave: (artist: string) => void
+  onPin: (artist: string) => void
+}) {
+  return (
+    <div className="artist-legend">
+      {artists.map((artist, index) => (
+        <button
+          key={artist}
+          className={`${activeArtist && activeArtist !== artist ? 'is-dimmed' : ''} ${pinnedArtist === artist ? 'is-pinned' : ''}`}
+          onMouseEnter={() => onHover(artist)}
+          onMouseLeave={() => onLeave(artist)}
+          onFocus={() => onHover(artist)}
+          onBlur={() => onLeave(artist)}
+          onClick={() => onPin(artist)}
+          aria-pressed={pinnedArtist === artist}
+        ><i style={{ background: ARTIST_COLORS[index] }} />{artist}</button>
+      ))}
+    </div>
+  )
+}
+
+function TasteProfile({ enrichment }: { enrichment: InsightEnrichment }) {
+  const [rangeKey, setRangeKey] = useState<InsightEnrichment['ranges'][number]['key']>('short_term')
+  const range = enrichment.ranges.find((item) => item.key === rangeKey) || enrichment.ranges[0]
+
+  return (
+    <div className="taste-profile">
+      <div className="taste-stats">
+        <span><small>Recent novelty</small><strong>{enrichment.discoveryPercent}%</strong><em>outside this range's top tracks</em></span>
+        <span><small>Range overlap</small><strong>{enrichment.archiveOverlapPercent}%</strong><em>Spotify favorites in archive leaders</em></span>
+      </div>
+
+      <div className="taste-range segmented">
+        {enrichment.ranges.map((item) => <button key={item.key} className={rangeKey === item.key ? 'active' : ''} onClick={() => setRangeKey(item.key)}>{item.label}</button>)}
+      </div>
+      <p className="taste-range-note">Spotify's "Long term" range is calculated from approximately one year of data. It is not an all-time view.</p>
+
+      {range && (range.artists.length || range.tracks.length) ? (
+        <div className="taste-rankings">
+          <div><h4>Top artists</h4><div className="taste-list">{range.artists.map((artist, index) => (
+            <a href={artist.url} target="_blank" rel="noreferrer" key={artist.url}>
+              <b>{String(index + 1).padStart(2, '0')}</b>{artist.imageUrl ? <img src={artist.imageUrl} alt="" /> : <span className="taste-image-fallback"><Users size={14} /></span>}<strong>{artist.name}</strong><ExternalLink size={12} />
+            </a>
+          ))}</div></div>
+          <div><h4>Top tracks</h4><div className="taste-list">{range.tracks.map((track, index) => (
+            <a href={track.url} target="_blank" rel="noreferrer" key={track.uri}>
+              <b>{String(index + 1).padStart(2, '0')}</b>{track.imageUrl ? <img src={track.imageUrl} alt="" /> : <span className="taste-image-fallback"><Music size={14} /></span>}<span><strong>{track.name}</strong><small>{track.artist}</small></span><ExternalLink size={12} />
+            </a>
+          ))}</div></div>
+        </div>
+      ) : <div className="taste-empty">Spotify did not return affinity data for this period.</div>}
+
+      {enrichment.recent.length > 0 && (
+        <div className="recent-pulse">
+          <div className="taste-section-heading"><div><span className="kicker">RECENT PULSE</span><h4>Your latest Spotify plays</h4></div><div className="context-tags">{enrichment.recentContexts.slice(0, 4).map((context) => <span key={context.name}>{context.name} · {context.count}</span>)}</div></div>
+          <div className="recent-strip">{enrichment.recent.map((track) => <a href={track.url} target="_blank" rel="noreferrer" key={`${track.playedAt}-${track.url}`}>{track.imageUrl ? <img src={track.imageUrl} alt="" /> : <span className="taste-image-fallback"><Music size={16} /></span>}<strong>{track.name}</strong><small>{track.artist}</small><time>{new Date(track.playedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time></a>)}</div>
+        </div>
+      )}
+
+      {enrichment.notices.length > 0 && <div className="taste-notices">{enrichment.notices.map((notice) => <span key={notice}>{notice}</span>)}</div>}
+    </div>
+  )
 }
 
 export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
@@ -306,12 +509,12 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
   const [endDate, setEndDate] = useState(bounds.max)
   const [granularity, setGranularity] = useState<InsightGranularity>('month')
   const [metric, setMetric] = useState<RankingMetric>('plays')
-  const [minMs, setMinMs] = useState(0)
+  const [minMs, setMinMs] = useState(30_000)
   const [artistView, setArtistView] = useState<ArtistView>('stacked')
   const [result, setResult] = useState<InsightResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [spotifyConnected, setSpotifyConnected] = useState(false)
+  const [spotifySession, setSpotifySession] = useState<SpotifySession | null>(null)
   const [connectError, setConnectError] = useState('')
   const [enrichment, setEnrichment] = useState<InsightEnrichment | null>(null)
   const [enrichmentLoading, setEnrichmentLoading] = useState(false)
@@ -319,7 +522,7 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
   const sequence = useRef(0)
 
   useEffect(() => {
-    if (authReady) void getSpotifySession().then((session) => setSpotifyConnected(Boolean(session)))
+    if (authReady) void getSpotifySession().then(setSpotifySession)
   }, [authReady])
 
   const loadInsights = useEffectEvent(async () => {
@@ -349,7 +552,7 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
   }, [startDate, endDate, minMs, granularity, metric])
 
   useEffect(() => {
-    if (!spotifyConnected || !result?.topTrackUris.length) return
+    if (!spotifySession?.tasteProfileReady || !result?.topTrackUris.length) return
     let current = true
     const timeout = window.setTimeout(() => {
       setEnrichmentLoading(true)
@@ -363,7 +566,7 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
       current = false
       window.clearTimeout(timeout)
     }
-  }, [spotifyConnected, result])
+  }, [spotifySession, result])
 
   function exportJson() {
     if (result) downloadFile(`playback-atlas-${startDate}-${endDate}.json`, JSON.stringify({ startDate, endDate, granularity, metric, data: result }, null, 2), 'application/json')
@@ -371,6 +574,22 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
 
   function exportCsv() {
     if (result) downloadFile(`playback-atlas-${startDate}-${endDate}.csv`, insightCsv(result), 'text/csv;charset=utf-8')
+  }
+
+  function exportInteractiveReport() {
+    if (result) downloadFile(
+      `playback-atlas-${startDate}-${endDate}.html`,
+      interactiveReportHtml({
+        startDate,
+        endDate,
+        granularity,
+        metric,
+        theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light',
+        result,
+        enrichment,
+      }),
+      'text/html;charset=utf-8',
+    )
   }
 
   async function beginConnection() {
@@ -386,19 +605,19 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
     <section className="insights" aria-labelledby="insights-title">
       <header className="insights-header">
         <div><span className="kicker">LISTENING INTELLIGENCE</span><h2 id="insights-title">Patterns in the archive.</h2><p>Independent from the overview · browser-local time</p></div>
-        <div className="insight-exports"><button disabled={!result} onClick={exportCsv}><Download size={14} /> CSV</button><button disabled={!result} onClick={exportJson}><Download size={14} /> JSON</button></div>
+        <div className="insight-exports"><button disabled={!result} onClick={exportCsv}><Download size={14} /> CSV</button><button disabled={!result} onClick={exportJson}><Download size={14} /> JSON</button><button disabled={!result} onClick={exportInteractiveReport}><Download size={14} /> HTML</button><button disabled={!result} onClick={() => window.print()}><Download size={14} /> PDF</button></div>
       </header>
 
       <div className="insight-controls">
         <label>From<input type="date" min={bounds.min} max={endDate} value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
         <label>To<input type="date" min={startDate} max={bounds.max} value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label>
-        <label>Minimum play<select value={minMs} onChange={(event) => setMinMs(Number(event.target.value))}><option value={0}>No minimum</option><option value={10000}>10 seconds</option><option value={30000}>30 seconds</option><option value={60000}>1 minute</option></select></label>
+        <label>Minimum play<select value={minMs} onChange={(event) => setMinMs(Number(event.target.value))}><option value={30000}>30 seconds</option><option value={60000}>1 minute</option></select></label>
         <div className="segmented insight-granularity">{(['day', 'week', 'month'] as InsightGranularity[]).map((option) => <button key={option} className={granularity === option ? 'active' : ''} onClick={() => setGranularity(option)}>{option}</button>)}</div>
         <div className="segmented insight-metric"><button className={metric === 'plays' ? 'active' : ''} onClick={() => setMetric('plays')}>Plays</button><button className={metric === 'duration' ? 'active' : ''} onClick={() => setMetric('duration')}>Time</button></div>
       </div>
 
-      {!spotifyConnected && (
-        <div className="enrichment-note"><Sparkles size={18} /><span><strong>Core insights are ready offline.</strong> Connect Spotify later for the best results with genres, release dates, popularity, and richer track metadata.{connectError && <small>{connectError}</small>}</span><button onClick={() => void beginConnection()}>Connect Spotify</button></div>
+      {!spotifySession?.tasteProfileReady && (
+        <div className="enrichment-note"><Sparkles size={18} /><span><strong>{spotifySession ? 'Unlock your Spotify taste profile.' : 'Core insights are ready offline.'}</strong> {spotifySession ? 'Reconnect once to allow top-items and recent-listening access.' : 'Connect Spotify for taste drift, recent plays, audio character, and archive overlap.'}{connectError && <small>{connectError}</small>}</span><button onClick={() => void beginConnection()}>{spotifySession ? 'Reconnect Spotify' : 'Connect Spotify'}</button></div>
       )}
 
       {error && <div className="insight-error">{error}</div>}
@@ -429,25 +648,13 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
 
           <article className="insight-panel insight-panel-wide">
             <header className="artist-panel-header"><div><span className="kicker">04 / ARTISTS</span><h3>Top 10 over time</h3></div><div className="segmented artist-view"><button className={artistView === 'stacked' ? 'active' : ''} onClick={() => setArtistView('stacked')}>Share</button><button className={artistView === 'ranked' ? 'active' : ''} onClick={() => setArtistView('ranked')}>Rank</button><button className={artistView === 'bars' ? 'active' : ''} onClick={() => setArtistView('bars')}>Total</button></div></header>
-            <ArtistChart result={result} metric={metric} view={artistView} />
+            <ArtistChart result={result} metric={metric} view={artistView} granularity={granularity} />
           </article>
 
-          {spotifyConnected && (
+          {spotifySession?.tasteProfileReady && (
             <article className="insight-panel insight-panel-wide enrichment-panel">
-              <header><div><span className="kicker">05 / SPOTIFY METADATA</span><h3>Context beyond the archive</h3></div><p>Top 100 tracks in this Insights range.</p></header>
-              {enrichmentLoading && !enrichment ? <div className="enrichment-loading">Loading genres and track details…</div> : enrichmentError ? <div className="enrichment-failure">{enrichmentError}</div> : enrichment && (
-                <div className="enrichment-content">
-                  <div className="metadata-stats">
-                    <span><small>Tracks enriched</small><strong>{enrichment.trackCount}</strong></span>
-                    <span><small>Average duration</small><strong>{Math.round(enrichment.averageDurationMs / 60_000)} min</strong></span>
-                    <span><small>Average popularity</small><strong>{Math.round(enrichment.averagePopularity)} / 100</strong></span>
-                  </div>
-                  <div className="metadata-columns">
-                    <div><h4>Genre signals</h4><div className="genre-bars">{enrichment.genres.map((genre) => <span key={genre.name}><strong>{genre.name}</strong><i><i style={{ width: `${(genre.count / Math.max(enrichment.genres[0]?.count || 1, 1)) * 100}%` }} /></i><small>{genre.count}</small></span>)}</div></div>
-                    <div><h4>Release eras</h4><div className="era-bars">{enrichment.releaseEras.map((era) => <span key={era.name}><strong>{era.name}</strong><i style={{ height: `${Math.max(5, (era.count / Math.max(...enrichment.releaseEras.map((item) => item.count), 1)) * 110)}px` }} /><small>{era.count}</small></span>)}</div></div>
-                  </div>
-                </div>
-              )}
+              <header><div><span className="kicker">05 / SPOTIFY PROFILE</span><h3>Context beyond the archive</h3></div><p>Live affinity and recent listening from Spotify.</p></header>
+              {enrichmentLoading && !enrichment ? <div className="enrichment-loading">Mapping your current Spotify taste…</div> : enrichmentError ? <div className="enrichment-failure">{enrichmentError}</div> : enrichment && <TasteProfile enrichment={enrichment} />}
             </article>
           )}
         </div>

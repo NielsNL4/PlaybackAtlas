@@ -1,4 +1,5 @@
 export type RankingMetric = 'plays' | 'duration'
+export type RankingView = 'tracks' | 'artists'
 export type InsightGranularity = 'day' | 'week' | 'month'
 
 export interface DateBounds {
@@ -12,6 +13,7 @@ export interface QueryFilters {
   minMs: number
   metric: RankingMetric
   page: number
+  ranking: RankingView
 }
 
 export interface TrackResult {
@@ -24,9 +26,18 @@ export interface TrackResult {
   totalMs: number
 }
 
+export interface ArtistResult {
+  rank: number
+  artistName: string
+  uniqueTracks: number
+  playCount: number
+  totalMs: number
+}
+
 export interface AnalyticsResult {
   tracks: TrackResult[]
-  totalTracks: number
+  artists: ArtistResult[]
+  totalResults: number
 }
 
 export interface PlaylistRankingRequest {
