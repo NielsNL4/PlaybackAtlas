@@ -239,7 +239,7 @@ function App() {
         ) : (
           <>
             <div className="dataset-banner">
-              <span><strong>{rowCount.toLocaleString()}</strong> plays indexed</span>
+              <span><strong>{rowCount.toLocaleString()}</strong> stream events indexed</span>
               <span>{bounds.min} → {bounds.max}</span>
               <span className={`cache-status ${cacheState === 'cached' ? 'is-cached' : ''}`}><HardDrive size={14} /> {cacheState === 'cached' ? 'Cached locally' : 'Session only'}</span>
               <div className="dataset-actions">

@@ -37,6 +37,7 @@ interface SpotifyInsightTrack {
   explicit: boolean
   external_urls: { spotify: string }
   album: {
+    id: string
     name: string
     release_date: string
     images: Array<{ url: string; width: number | null; height: number | null }>
@@ -49,6 +50,16 @@ interface SpotifyArtistMetadata {
   name: string
   external_urls: { spotify: string }
   images: Array<{ url: string; width: number | null; height: number | null }>
+}
+
+interface SpotifyPlaylist {
+  id: string
+  name: string
+}
+
+interface SpotifyPlaylistItem {
+  track?: { uri?: string } | null
+  item?: { uri?: string } | null
 }
 
 interface SpotifyPage<T> {
@@ -88,11 +99,25 @@ export interface InsightEnrichment {
   recentContexts: Array<{ name: string; count: number }>
   discoveryPercent: number
   archiveOverlapPercent: number
+  affinityContinuityPercent: number
+  savedFavoritesPercent: number | null
+  savedAlbumsPercent: number | null
+  followedArtistsPercent: number | null
+  playlistCoveragePercent: number | null
+  explicitPercent: number
+  releaseEras: Array<{ label: string; count: number }>
   notices: string[]
 }
 
 const artworkCache = new Map<string, string>()
-const PROFILE_SCOPES = ['user-top-read', 'user-read-recently-played']
+const PROFILE_SCOPES = [
+  'user-top-read',
+  'user-read-recently-played',
+  'user-library-read',
+  'user-follow-read',
+  'playlist-read-private',
+  'playlist-read-collaborative',
+]
 const profileRequestCache = new Map<string, Promise<unknown>>()
 const artistProfileCache = new Map<string, { profile: SpotifyArtistProfile; fetchedAt: number }>()
 let topArtistSeed: Promise<void> | null = null
@@ -128,9 +153,21 @@ function cacheArtistProfile(name: string, profile: SpotifyArtistProfile, persist
 }
 
 function configuration() {
-  const clientId = import.meta.env.VITE_SPOTIFY_CLIENT_ID
-  const redirectUri = import.meta.env.VITE_SPOTIFY_REDIRECT_URI
-    || new URL(import.meta.env.BASE_URL, window.location.origin).toString()
+  const clientId = import.meta.env.VITE_SPOTIFY_CLIENT_ID?.trim()
+  const configuredRedirectUri = import.meta.env.VITE_SPOTIFY_REDIRECT_URI?.trim()
+  const runtimeRedirectUri = new URL(import.meta.env.BASE_URL, window.location.origin)
+  let redirectUri = runtimeRedirectUri.toString()
+
+  if (configuredRedirectUri) {
+    const configuredUrl = new URL(configuredRedirectUri)
+    const isSameRuntimeLocation = configuredUrl.protocol === runtimeRedirectUri.protocol
+      && configuredUrl.hostname.toLowerCase() === runtimeRedirectUri.hostname.toLowerCase()
+      && configuredUrl.port === runtimeRedirectUri.port
+      && configuredUrl.pathname === runtimeRedirectUri.pathname
+      && configuredUrl.search === runtimeRedirectUri.search
+      && configuredUrl.hash === runtimeRedirectUri.hash
+    redirectUri = isSameRuntimeLocation ? runtimeRedirectUri.toString() : configuredUrl.toString()
+  }
 
   if (!clientId) {
     throw new Error('Set VITE_SPOTIFY_CLIENT_ID before connecting Spotify.')
@@ -184,7 +221,10 @@ async function exchangeToken(body: URLSearchParams) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-  if (!response.ok) throw new Error('Spotify authorization could not be completed.')
+  if (!response.ok) {
+    const details = await response.json().catch(() => null) as { error?: string; error_description?: string } | null
+    throw new Error(details?.error_description || details?.error || `Spotify authorization failed (${response.status}).`)
+  }
   return response.json() as Promise<TokenResponse>
 }
 
@@ -266,12 +306,19 @@ export async function handleSpotifyCallback() {
   const params = new URLSearchParams(window.location.search)
   const code = params.get('code')
   const error = params.get('error')
-  if (error) throw new Error(`Spotify authorization was declined: ${error}`)
+  if (error) {
+    localStorage.removeItem(VERIFIER_KEY)
+    sessionStorage.removeItem(STATE_KEY)
+    window.history.replaceState({}, '', window.location.pathname)
+    throw new Error(`Spotify authorization was declined: ${error}`)
+  }
   if (!code) return false
 
   const verifier = localStorage.getItem(VERIFIER_KEY)
   const expectedState = sessionStorage.getItem(STATE_KEY)
   if (!verifier || !expectedState || params.get('state') !== expectedState) {
+    localStorage.removeItem(VERIFIER_KEY)
+    sessionStorage.removeItem(STATE_KEY)
     throw new Error('Spotify authorization state was invalid. Please connect again.')
   }
 
@@ -457,6 +504,58 @@ export async function getInsightEnrichment(uris: string[]): Promise<InsightEnric
   }
 
   const profileTracks = [...new Map(rangeResults.flatMap((range) => range.trackItems).map((track) => [track.uri, track])).values()]
+  const profileArtists = [...new Map(rangeResults.flatMap((range) => range.artistItems).map((artist) => [artist.id, artist])).values()]
+  const profileAlbums = [...new Map(profileTracks.map((track) => [track.album.id, track.album])).values()]
+  const shortUris = new Set(rangeResults.find((range) => range.key === 'short_term')?.trackItems.map((track) => track.uri) || [])
+  const longUris = new Set(rangeResults.find((range) => range.key === 'long_term')?.trackItems.map((track) => track.uri) || [])
+  const continuity = [...shortUris].filter((uri) => longUris.has(uri)).length
+
+  async function contains(path: string, ids: string[]) {
+    if (!ids.length) return []
+    return cachedProfileApi<boolean[]>(`${path}?ids=${encodeURIComponent(ids.slice(0, 50).join(','))}`)
+  }
+
+  const [savedTracksResult, savedAlbumsResult, playlistsResult] = await Promise.allSettled([
+    contains('/me/tracks/contains', profileTracks.map((track) => track.uri.slice('spotify:track:'.length))),
+    contains('/me/albums/contains', profileAlbums.map((album) => album.id)),
+    cachedProfileApi<SpotifyPage<SpotifyPlaylist>>('/me/playlists?limit=8'),
+  ])
+
+  // The following endpoint also requires its resource type alongside the IDs.
+  let followedArtists: boolean[] | null = null
+  if (profileArtists.length) {
+    try {
+      followedArtists = await cachedProfileApi<boolean[]>(`/me/following/contains?type=artist&ids=${encodeURIComponent(profileArtists.slice(0, 50).map((artist) => artist.id).join(','))}`)
+    } catch {
+      notices.push('Followed-artist coverage is unavailable.')
+    }
+  }
+  const savedTracks = savedTracksResult.status === 'fulfilled' ? savedTracksResult.value : null
+  const savedAlbums = savedAlbumsResult.status === 'fulfilled' ? savedAlbumsResult.value : null
+  if (!savedTracks) notices.push('Saved-track coverage is unavailable.')
+  if (!savedAlbums) notices.push('Saved-album coverage is unavailable.')
+
+  let playlistCoverage: number | null = null
+  if (playlistsResult.status === 'fulfilled' && playlistsResult.value.items.length && profileTracks.length) {
+    const sampledPlaylists = playlistsResult.value.items.slice(0, 8)
+    const playlistItems = await Promise.allSettled(sampledPlaylists.map((playlist) =>
+      cachedProfileApi<SpotifyPage<SpotifyPlaylistItem>>(`/playlists/${encodeURIComponent(playlist.id)}/items?limit=100`),
+    ))
+    const playlistUris = new Set(playlistItems.flatMap((item) => item.status === 'fulfilled'
+      ? item.value.items.flatMap((entry) => entry.item?.uri || entry.track?.uri ? [entry.item?.uri || entry.track?.uri] : [])
+      : []))
+    playlistCoverage = Math.round((profileTracks.filter((track) => playlistUris.has(track.uri)).length / profileTracks.length) * 100)
+    notices.push(`Playlist coverage samples ${sampledPlaylists.length} playlists with up to 100 items each.`)
+  } else if (playlistsResult.status === 'rejected') {
+    notices.push('Playlist coverage is unavailable.')
+  }
+
+  const releaseEraCounts = new Map<string, number>()
+  profileTracks.forEach((track) => {
+    const year = Number(track.album.release_date.slice(0, 4))
+    const label = Number.isFinite(year) ? `${Math.floor(year / 10) * 10}s` : 'Unknown'
+    releaseEraCounts.set(label, (releaseEraCounts.get(label) || 0) + 1)
+  })
 
   const contextCounts = new Map<string, number>()
   recentItems.forEach((item) => {
@@ -493,6 +592,13 @@ export async function getInsightEnrichment(uris: string[]): Promise<InsightEnric
     recentContexts: [...contextCounts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
     discoveryPercent: recentItems.length ? Math.round((discovered / recentItems.length) * 100) : 0,
     archiveOverlapPercent: profileTracks.length ? Math.round((overlap / profileTracks.length) * 100) : 0,
+    affinityContinuityPercent: shortUris.size ? Math.round((continuity / shortUris.size) * 100) : 0,
+    savedFavoritesPercent: savedTracks?.length ? Math.round((savedTracks.filter(Boolean).length / savedTracks.length) * 100) : null,
+    savedAlbumsPercent: savedAlbums?.length ? Math.round((savedAlbums.filter(Boolean).length / savedAlbums.length) * 100) : null,
+    followedArtistsPercent: followedArtists?.length ? Math.round((followedArtists.filter(Boolean).length / followedArtists.length) * 100) : null,
+    playlistCoveragePercent: playlistCoverage,
+    explicitPercent: profileTracks.length ? Math.round((profileTracks.filter((track) => track.explicit).length / profileTracks.length) * 100) : 0,
+    releaseEras: [...releaseEraCounts.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count),
     notices,
   }
 }

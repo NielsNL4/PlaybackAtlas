@@ -35,13 +35,48 @@ export function interactiveReportHtml(data: ReportData) {
   const artistMaximum = data.metric === 'plays'
     ? data.result.artistTotals[0]?.plays || 1
     : data.result.artistTotals[0]?.totalMs || 1
+  const behavior = data.result.behavior.reduce((total, item) => ({
+    streams: total.streams + item.streams,
+    natural: total.natural + item.naturalEnds,
+    early: total.early + item.earlyExits,
+  }), { streams: 0, natural: 0, early: 0 })
+  const percent = (value: number, total: number) => total ? `${Math.round((value / total) * 100)}%` : '0%'
+  const optionalPercent = (value: number | null) => value == null ? 'N/A' : `${value}%`
+
+  const storySection = `
+    <section id="story" class="section">
+      <div class="cards">
+        <article class="card"><span class="label">All stream events</span><strong>${data.result.totalStreams.toLocaleString()}</strong></article>
+        <article class="card"><span class="label">Sessions</span><strong>${data.result.sessionSummary.sessions.toLocaleString()}</strong></article>
+        <article class="card"><span class="label">Longest streak</span><strong>${data.result.highlights.longestStreakDays} days</strong></article>
+        <article class="card"><span class="label">Played through</span><strong>${percent(behavior.natural, behavior.streams)}</strong></article>
+      </div>
+      <div class="split">
+        <article class="panel"><h2>Session shape</h2><p>A new session begins after 30 minutes of inactivity.</p><table><tbody>
+          <tr><td>Average listening</td><td>${escapeHtml(formatHours(data.result.sessionSummary.averageSessionMs))}</td></tr>
+          <tr><td>Average streams</td><td>${data.result.sessionSummary.averageStreams.toFixed(1)}</td></tr>
+          <tr><td>Longest span</td><td>${escapeHtml(formatHours(data.result.sessionSummary.longestSessionMs))}</td></tr>
+          <tr><td>Quick exits</td><td>${percent(behavior.early, behavior.streams)}</td></tr>
+        </tbody></table></article>
+        <article class="panel"><h2>Discovery retention</h2><p>Returns after a track's first appearance in the archive.</p><table><tbody>
+          <tr><td>Discoveries</td><td>${data.result.retention.discoveries.toLocaleString()}</td></tr>
+          <tr><td>Returned in 7 days</td><td>${percent(data.result.retention.retained7Day, data.result.retention.eligible7Day)}</td></tr>
+          <tr><td>Returned in 30 days</td><td>${percent(data.result.retention.retained30Day, data.result.retention.eligible30Day)}</td></tr>
+          <tr><td>One and done</td><td>${data.result.retention.oneAndDone.toLocaleString()}</td></tr>
+        </tbody></table></article>
+      </div>
+      <article class="panel"><h2>Leading albums</h2><p>Ranked by the selected metric, with track depth and longest same-album run.</p><table><thead><tr><th>#</th><th>Album</th><th>Artist</th><th>Depth / run</th><th>Value</th></tr></thead><tbody>${data.result.albumTotals.map((album, index) => `<tr><td>${String(index + 1).padStart(2, '0')}</td><td>${escapeHtml(album.albumName)}</td><td>${escapeHtml(album.artistName)}</td><td>${album.uniqueTracks} / ${album.longestRun}</td><td>${escapeHtml(formatMetric(album, data.metric))}</td></tr>`).join('')}</tbody></table></article>
+    </section>`
 
   const spotifySection = data.enrichment ? `
     <section id="spotify" class="section">
       <div class="taste">
         <article><span class="label">Recent novelty</span><strong>${data.enrichment.discoveryPercent}%</strong></article>
         <article><span class="label">Archive overlap</span><strong>${data.enrichment.archiveOverlapPercent}%</strong></article>
-        <article><span class="label">Recent contexts</span><strong>${data.enrichment.recentContexts.length}</strong></article>
+        <article><span class="label">Affinity continuity</span><strong>${data.enrichment.affinityContinuityPercent}%</strong></article>
+        <article><span class="label">Saved favorites</span><strong>${optionalPercent(data.enrichment.savedFavoritesPercent)}</strong></article>
+        <article><span class="label">Followed artists</span><strong>${optionalPercent(data.enrichment.followedArtistsPercent)}</strong></article>
+        <article><span class="label">Playlist coverage</span><strong>${optionalPercent(data.enrichment.playlistCoveragePercent)}</strong></article>
       </div>
       <div class="split">
         <article class="panel">
@@ -183,6 +218,7 @@ export function interactiveReportHtml(data: ReportData) {
   </header>
   <nav class="actions" aria-label="Report sections">
     <button class="active" data-section="overview">Overview</button>
+    <button data-section="story">Story</button>
     <button data-section="artists">Artists</button>
     ${data.enrichment ? '<button data-section="spotify">Spotify profile</button>' : ''}
     <button type="button" onclick="window.print()">Print / PDF</button>
@@ -212,6 +248,7 @@ export function interactiveReportHtml(data: ReportData) {
         </article>
       </div>
     </section>
+    ${storySection}
     <section id="artists" class="section">
       <article class="panel">
         <h2>Top artists</h2><p>Ranked using the metric selected when this snapshot was exported.</p>

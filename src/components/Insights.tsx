@@ -1,8 +1,9 @@
-import { BarChart3, Clock3, Download, ExternalLink, Headphones, Music, Sparkles, Users } from 'lucide-react'
+import { BarChart3, CalendarDays, Clock3, Disc3, Download, ExternalLink, Headphones, Music, Sparkles, Users } from 'lucide-react'
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { analytics } from '../services/analytics'
 import { interactiveReportHtml } from '../services/report'
 import { connectSpotify, getInsightEnrichment, getSpotifySession, type InsightEnrichment, type SpotifySession } from '../services/spotify'
+import { browserTimezone } from '../services/timezone'
 import type {
   DateBounds,
   InsightDiscoveryPoint,
@@ -27,6 +28,7 @@ const ARTIST_COLORS = [
 
 function formatDuration(ms: number) {
   const hours = ms / 3_600_000
+  if (hours < 1) return `${Math.round(ms / 60_000).toLocaleString()} min`
   return hours >= 100 ? `${Math.round(hours).toLocaleString()} hr` : `${hours.toFixed(1)} hr`
 }
 
@@ -67,10 +69,110 @@ function insightCsv(result: InsightResult) {
     ['summary', '', 'all', result.summary.totalPlays, result.summary.totalMs, result.summary.uniqueTracks, result.summary.uniqueArtists],
     ...result.volume.map((item) => ['volume', item.period, '', item.plays, item.totalMs, item.uniqueTracks, item.uniqueArtists]),
     ...result.discovery.map((item) => ['discovery', item.period, '', item.firstPlays + item.repeatPlays, '', item.firstPlays, item.repeatPlays]),
+    ...result.behavior.map((item) => ['behavior', item.period, '', item.qualifiedPlays, '', item.streams, item.earlyExits]),
+    ...result.longestSessions.map((item) => ['session', item.startedAt, '', item.streams, item.totalMs, item.durationMs, '']),
+    ...result.albumTotals.map((item) => ['album', '', `${item.artistName} — ${item.albumName}`, item.plays, item.totalMs, item.uniqueTracks, item.longestRun]),
+    ...result.rediscoveries.map((item) => ['rediscovery', item.returnedAt, `${item.artistName} — ${item.trackName}`, '', '', item.gapDays, '']),
     ...result.artistTrends.map((item) => ['artist', item.period, item.artistName, item.plays, item.totalMs, item.rank, '']),
     ...result.heatmap.map((item) => ['heatmap', '', `${item.weekday}:${item.hour}`, item.plays, item.totalMs, item.weekday, item.hour]),
   ]
   return rows.map((row) => row.map(csvCell).join(',')).join('\n')
+}
+
+function formatPercentChange(value: number | null) {
+  if (value == null) return 'No prior activity'
+  const rounded = Math.round(value)
+  return `${rounded > 0 ? '+' : ''}${rounded}% vs prior range`
+}
+
+function shortPercentChange(value: number | null) {
+  if (value == null) return 'N/A'
+  const rounded = Math.round(value)
+  return `${rounded > 0 ? '+' : ''}${rounded}%`
+}
+
+function RangeHighlights({ result, startDate, endDate }: { result: InsightResult; startDate: string; endDate: string }) {
+  return (
+    <article className="story-opening">
+      <div className="story-dates"><CalendarDays size={17} /><span>{startDate}</span><i /> <span>{endDate}</span></div>
+      <div className="story-lead">
+        <span className="kicker">00 / RANGE HIGHLIGHTS</span>
+        <h3>{result.highlights.topTrackName ? <><em>{result.highlights.topTrackName}</em> led this chapter.</> : 'A quiet chapter in the archive.'}</h3>
+        {result.highlights.topTrackArtist && <p>{result.highlights.topTrackArtist} was behind the range's leading track. Your busiest listening day was {result.highlights.busiestDate || 'not available'}.</p>}
+      </div>
+      <div className="highlight-ledger">
+        <span><small>All stream events</small><strong>{result.totalStreams.toLocaleString()}</strong><em>{result.summary.totalPlays.toLocaleString()} qualified plays</em></span>
+        <span><small>Listening shift</small><strong>{shortPercentChange(result.comparison.listeningChangePercent)}</strong><em>{formatPercentChange(result.comparison.listeningChangePercent)}</em></span>
+        <span><small>Longest active streak</small><strong>{result.highlights.longestStreakDays}</strong><em>consecutive days</em></span>
+        <span><small>Leading album</small><strong className="highlight-name">{result.highlights.topAlbumName || 'No album data'}</strong><em>{result.highlights.topAlbumArtist || 'Metadata unavailable'}</em></span>
+      </div>
+    </article>
+  )
+}
+
+function SessionStory({ result }: { result: InsightResult }) {
+  return (
+    <div className="session-story">
+      <div className="story-stat-grid">
+        <span><small>Sessions</small><strong>{result.sessionSummary.sessions.toLocaleString()}</strong></span>
+        <span><small>Average session</small><strong>{formatDuration(result.sessionSummary.averageSessionMs)}</strong></span>
+        <span><small>Streams / session</small><strong>{result.sessionSummary.averageStreams.toFixed(1)}</strong></span>
+        <span><small>Longest span</small><strong>{formatDuration(result.sessionSummary.longestSessionMs)}</strong></span>
+      </div>
+      <div className="story-ranked-list">
+        {result.longestSessions.slice(0, 5).map((session, index) => (
+          <span key={session.startedAt}><b>{String(index + 1).padStart(2, '0')}</b><strong>{new Date(session.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</strong><small>{session.streams} streams · {formatDuration(session.totalMs)}</small></span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function BehaviorStory({ result }: { result: InsightResult }) {
+  const totals = result.behavior.reduce((sum, item) => ({
+    streams: sum.streams + item.streams,
+    natural: sum.natural + item.naturalEnds,
+    early: sum.early + item.earlyExits,
+    other: sum.other + item.otherEnds,
+    shuffled: sum.shuffled + item.shuffled,
+    offline: sum.offline + item.offline,
+  }), { streams: 0, natural: 0, early: 0, other: 0, shuffled: 0, offline: 0 })
+  const share = (value: number) => totals.streams ? (value / totals.streams) * 100 : 0
+  return (
+    <div className="behavior-story">
+      <div className="outcome-bar" aria-label="How streams ended">
+        <span className="outcome-natural" style={{ width: `${share(totals.natural)}%` }} />
+        <span className="outcome-early" style={{ width: `${share(totals.early)}%` }} />
+        <span className="outcome-other" style={{ width: `${share(totals.other)}%` }} />
+      </div>
+      <div className="outcome-legend">
+        <span><i className="outcome-natural" /><strong>{Math.round(share(totals.natural))}%</strong><small>played through</small></span>
+        <span><i className="outcome-early" /><strong>{Math.round(share(totals.early))}%</strong><small>quick exits</small></span>
+        <span><i className="outcome-other" /><strong>{Math.round(share(totals.other))}%</strong><small>other endings</small></span>
+      </div>
+      <div className="behavior-notes"><span><strong>{Math.round(share(totals.shuffled))}%</strong> shuffled</span><span><strong>{Math.round(share(totals.offline))}%</strong> offline</span><span><strong>{result.platforms.length}</strong> platform signatures</span></div>
+    </div>
+  )
+}
+
+function RetentionStory({ result }: { result: InsightResult }) {
+  const rate = (retained: number, eligible: number) => eligible ? Math.round((retained / eligible) * 100) : 0
+  return (
+    <div className="retention-story">
+      <div className="retention-stats">
+        <span><small>Discoveries</small><strong>{result.retention.discoveries.toLocaleString()}</strong></span>
+        <span><small>Returned in 7 days</small><strong>{rate(result.retention.retained7Day, result.retention.eligible7Day)}%</strong><em>{result.retention.eligible7Day.toLocaleString()} eligible</em></span>
+        <span><small>Returned in 30 days</small><strong>{rate(result.retention.retained30Day, result.retention.eligible30Day)}%</strong><em>{result.retention.eligible30Day.toLocaleString()} eligible</em></span>
+        <span><small>One and done</small><strong>{result.retention.oneAndDone.toLocaleString()}</strong></span>
+      </div>
+      {result.rediscoveries.length > 0 && <div className="rediscovery-list"><h4>Longest returns</h4>{result.rediscoveries.slice(0, 5).map((item) => <span key={`${item.returnedAt}-${item.artistName}-${item.trackName}`}><Disc3 size={14} /><strong>{item.trackName}</strong><small>{item.artistName}</small><b>{item.gapDays} days</b></span>)}</div>}
+    </div>
+  )
+}
+
+function AlbumStory({ result, metric }: { result: InsightResult; metric: RankingMetric }) {
+  const maximum = Math.max(...result.albumTotals.map((album) => metricValue(album, metric)), 1)
+  return <div className="album-story">{result.albumTotals.map((album, index) => <div className="album-row" key={`${album.artistName}-${album.albumName}`}><b>{String(index + 1).padStart(2, '0')}</b><span><strong>{album.albumName}</strong><small>{album.artistName}</small></span><i><span style={{ width: `${(metricValue(album, metric) / maximum) * 100}%` }} /></i><em>{formatMetric(metricValue(album, metric), metric)} · {album.uniqueTracks} tracks · run of {album.longestRun}</em></div>)}</div>
 }
 
 function VolumeChart({
@@ -464,13 +566,22 @@ function ArtistLegend({
 function TasteProfile({ enrichment }: { enrichment: InsightEnrichment }) {
   const [rangeKey, setRangeKey] = useState<InsightEnrichment['ranges'][number]['key']>('short_term')
   const range = enrichment.ranges.find((item) => item.key === rangeKey) || enrichment.ranges[0]
+  const percent = (value: number | null) => value == null ? 'N/A' : `${value}%`
 
   return (
     <div className="taste-profile">
       <div className="taste-stats">
         <span><small>Recent novelty</small><strong>{enrichment.discoveryPercent}%</strong><em>outside this range's top tracks</em></span>
         <span><small>Range overlap</small><strong>{enrichment.archiveOverlapPercent}%</strong><em>Spotify favorites in archive leaders</em></span>
+        <span><small>Short-to-long continuity</small><strong>{enrichment.affinityContinuityPercent}%</strong><em>recent favorites also in long term</em></span>
+        <span><small>Saved favorites</small><strong>{percent(enrichment.savedFavoritesPercent)}</strong><em>affinity tracks in your library</em></span>
+        <span><small>Saved albums</small><strong>{percent(enrichment.savedAlbumsPercent)}</strong><em>favorite-track albums saved</em></span>
+        <span><small>Followed artists</small><strong>{percent(enrichment.followedArtistsPercent)}</strong><em>affinity artists followed</em></span>
+        <span><small>Playlist coverage</small><strong>{percent(enrichment.playlistCoveragePercent)}</strong><em>affinity tracks in sampled playlists</em></span>
+        <span><small>Explicit tracks</small><strong>{enrichment.explicitPercent}%</strong><em>across current affinity tracks</em></span>
       </div>
+
+      {enrichment.releaseEras.length > 0 && <div className="release-eras"><span className="kicker">RELEASE ERAS</span><div>{enrichment.releaseEras.map((era) => <span key={era.label}><strong>{era.label}</strong><i style={{ width: `${(era.count / enrichment.releaseEras[0].count) * 100}%` }} /><small>{era.count}</small></span>)}</div></div>}
 
       <div className="taste-range segmented">
         {enrichment.ranges.map((item) => <button key={item.key} className={rangeKey === item.key ? 'active' : ''} onClick={() => setRangeKey(item.key)}>{item.label}</button>)}
@@ -505,6 +616,7 @@ function TasteProfile({ enrichment }: { enrichment: InsightEnrichment }) {
 }
 
 export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
+  const [{ timezone, timezoneTransitions }] = useState(() => browserTimezone(bounds.min, bounds.max))
   const [startDate, setStartDate] = useState(bounds.min)
   const [endDate, setEndDate] = useState(bounds.max)
   const [granularity, setGranularity] = useState<InsightGranularity>('month')
@@ -536,7 +648,8 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
         minMs,
         granularity,
         metric,
-        timezoneOffsetMinutes: -new Date().getTimezoneOffset(),
+        timezone,
+        timezoneTransitions,
       })
       if (current === sequence.current) setResult(next)
     } catch (reason) {
@@ -604,7 +717,7 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
   return (
     <section className="insights" aria-labelledby="insights-title">
       <header className="insights-header">
-        <div><span className="kicker">LISTENING INTELLIGENCE</span><h2 id="insights-title">Patterns in the archive.</h2><p>Independent from the overview · browser-local time</p></div>
+        <div><span className="kicker">LISTENING INTELLIGENCE</span><h2 id="insights-title">Patterns in the archive.</h2><p>Independent from the overview · {timezone}</p></div>
         <div className="insight-exports"><button disabled={!result} onClick={exportCsv}><Download size={14} /> CSV</button><button disabled={!result} onClick={exportJson}><Download size={14} /> JSON</button><button disabled={!result} onClick={exportInteractiveReport}><Download size={14} /> HTML</button><button disabled={!result} onClick={() => window.print()}><Download size={14} /> PDF</button></div>
       </header>
 
@@ -617,12 +730,14 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
       </div>
 
       {!spotifySession?.tasteProfileReady && (
-        <div className="enrichment-note"><Sparkles size={18} /><span><strong>{spotifySession ? 'Unlock your Spotify taste profile.' : 'Core insights are ready offline.'}</strong> {spotifySession ? 'Reconnect once to allow top-items and recent-listening access.' : 'Connect Spotify for taste drift, recent plays, audio character, and archive overlap.'}{connectError && <small>{connectError}</small>}</span><button onClick={() => void beginConnection()}>{spotifySession ? 'Reconnect Spotify' : 'Connect Spotify'}</button></div>
+        <div className="enrichment-note"><Sparkles size={18} /><span><strong>{spotifySession ? 'Unlock your Spotify taste profile.' : 'Core insights are ready offline.'}</strong> {spotifySession ? 'Reconnect once to allow top-items and recent-listening access.' : 'Connect Spotify for affinity shifts, recent plays, and archive overlap.'}{connectError && <small>{connectError}</small>}</span><button onClick={() => void beginConnection()}>{spotifySession ? 'Reconnect Spotify' : 'Connect Spotify'}</button></div>
       )}
 
       {error && <div className="insight-error">{error}</div>}
       {loading && !result ? <div className="insights-loading"><BarChart3 size={30} /><span>Aggregating your archive…</span></div> : result && (
         <div className={loading ? 'insight-content is-loading' : 'insight-content'}>
+          <RangeHighlights result={result} startDate={startDate} endDate={endDate} />
+
           <div className="insight-summary">
             <article><Headphones /><span>Total plays</span><strong>{result.summary.totalPlays.toLocaleString()}</strong></article>
             <article><Clock3 /><span>Listening time</span><strong>{formatDuration(result.summary.totalMs)}</strong></article>
@@ -631,29 +746,50 @@ export function Insights({ bounds, authReady, onExploreRange }: InsightsProps) {
           </div>
 
           <article className="insight-panel insight-panel-wide">
-            <header><div><span className="kicker">01 / VOLUME</span><h3>Listening over time</h3></div><p>Choose a point for details and linked tracks.</p></header>
+            <header><div><span className="kicker">01 / THE ARC</span><h3>Listening over time</h3></div><p>Choose a point for details and linked tracks.</p></header>
             <VolumeChart data={result.volume} metric={metric} granularity={granularity} endDate={endDate} onExploreRange={onExploreRange} />
+          </article>
+
+          <article className="insight-panel insight-panel-wide">
+            <header><div><span className="kicker">02 / SESSIONS</span><h3>How listening took shape</h3></div><p>A new session begins after 30 minutes of inactivity.</p></header>
+            <SessionStory result={result} />
           </article>
 
           <div className="insight-panel-grid">
             <article className="insight-panel heatmap-panel">
-              <header><div><span className="kicker">02 / RHYTHM</span><h3>When you listen</h3></div><p>Browser-local weekday and hour.</p></header>
+              <header><div><span className="kicker">03 / RHYTHM</span><h3>When you listen</h3></div><p>Weekday and hour in {timezone}.</p></header>
               <Heatmap data={result.heatmap} metric={metric} />
             </article>
+            <article className="insight-panel behavior-panel">
+              <header><div><span className="kicker">04 / ATTENTION</span><h3>How streams ended</h3></div><p>Every stream event, including short plays.</p></header>
+              <BehaviorStory result={result} />
+            </article>
+          </div>
+
+          <div className="insight-panel-grid">
             <article className="insight-panel discovery-panel">
-              <header><div><span className="kicker">03 / DISCOVERY</span><h3>First plays vs repeats</h3></div><p>First-ever appearances in your archive.</p></header>
+              <header><div><span className="kicker">05 / DISCOVERY</span><h3>First plays vs repeats</h3></div><p>First-ever appearances in your archive.</p></header>
               <DiscoveryChart data={result.discovery} granularity={granularity} endDate={endDate} onExploreRange={onExploreRange} />
+            </article>
+            <article className="insight-panel retention-panel">
+              <header><div><span className="kicker">06 / RETENTION</span><h3>What stayed with you</h3></div><p>Returns after a track first entered the archive.</p></header>
+              <RetentionStory result={result} />
             </article>
           </div>
 
           <article className="insight-panel insight-panel-wide">
-            <header className="artist-panel-header"><div><span className="kicker">04 / ARTISTS</span><h3>Top 10 over time</h3></div><div className="segmented artist-view"><button className={artistView === 'stacked' ? 'active' : ''} onClick={() => setArtistView('stacked')}>Share</button><button className={artistView === 'ranked' ? 'active' : ''} onClick={() => setArtistView('ranked')}>Rank</button><button className={artistView === 'bars' ? 'active' : ''} onClick={() => setArtistView('bars')}>Total</button></div></header>
+            <header className="artist-panel-header"><div><span className="kicker">07 / TASTE EVOLUTION</span><h3>Top 10 artists over time</h3></div><div className="segmented artist-view"><button className={artistView === 'stacked' ? 'active' : ''} onClick={() => setArtistView('stacked')}>Share</button><button className={artistView === 'ranked' ? 'active' : ''} onClick={() => setArtistView('ranked')}>Rank</button><button className={artistView === 'bars' ? 'active' : ''} onClick={() => setArtistView('bars')}>Total</button></div></header>
             <ArtistChart result={result} metric={metric} view={artistView} granularity={granularity} />
           </article>
 
+          {result.albumTotals.length > 0 && <article className="insight-panel insight-panel-wide">
+            <header><div><span className="kicker">08 / ALBUMS</span><h3>Records, not just tracks</h3></div><p>Depth counts distinct tracks; runs stay within a session.</p></header>
+            <AlbumStory result={result} metric={metric} />
+          </article>}
+
           {spotifySession?.tasteProfileReady && (
             <article className="insight-panel insight-panel-wide enrichment-panel">
-              <header><div><span className="kicker">05 / SPOTIFY PROFILE</span><h3>Context beyond the archive</h3></div><p>Live affinity and recent listening from Spotify.</p></header>
+              <header><div><span className="kicker">EPILOGUE / SPOTIFY</span><h3>Context beyond the archive</h3></div><p>Live affinity and recent listening from Spotify.</p></header>
               {enrichmentLoading && !enrichment ? <div className="enrichment-loading">Mapping your current Spotify taste…</div> : enrichmentError ? <div className="enrichment-failure">{enrichmentError}</div> : enrichment && <TasteProfile enrichment={enrichment} />}
             </article>
           )}

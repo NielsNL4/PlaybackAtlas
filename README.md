@@ -58,7 +58,7 @@ Playlist export is optional. History ingestion and analytics work without Spotif
 4. Set `VITE_SPOTIFY_REDIRECT_URI=http://127.0.0.1:5174/` in `.env.local`. The value must match the dashboard entry exactly, including the trailing slash.
 5. Add your Spotify account under the app's user access settings if the app remains in development mode.
 
-The app requests `playlist-modify-public`, `playlist-modify-private`, `user-top-read`, and `user-read-recently-played`. Playlist scopes are used only for exports; the read scopes power the optional Spotify Taste Profile in Insights. The PKCE verifier and OAuth state are generated with Web Crypto. The access/refresh token and granted scopes are retained in browser storage and refreshed directly against Spotify when necessary. Disconnecting removes the stored token.
+The app requests `playlist-modify-public`, `playlist-modify-private`, `user-top-read`, `user-read-recently-played`, `user-library-read`, `user-follow-read`, `playlist-read-private`, and `playlist-read-collaborative`. Modify scopes are used only for exports; read scopes power the optional Spotify epilogue in Insights. The PKCE verifier and OAuth state are generated with Web Crypto. The access/refresh token and granted scopes are retained in browser storage and refreshed directly against Spotify when necessary. Disconnecting removes the stored token.
 
 ## Spotify Export Data
 
@@ -77,14 +77,20 @@ Playlist generation has its own filters and does not use the overview's date ran
 The independent **Insights** tab aggregates chart data in the DuckDB worker and defaults to the full archive. It includes:
 
 - Summary totals for plays, listening time, unique tracks, and unique artists
+- All stream events versus qualified plays and comparison with the preceding equal-length range
+- Busiest day, longest active streak, and leading track and album
 - Listening volume with day, week, and month grouping plus plays/time toggles
-- A browser-local weekday/hour activity heatmap
+- A weekday/hour activity heatmap using the browser's IANA timezone and historical daylight-saving rules
+- Listening sessions separated by 30 minutes of inactivity
+- Played-through, quick-exit, shuffle, offline, and platform behavior across all stream events
 - First-ever track plays versus repeat listening
+- 7-day and 30-day discovery retention, one-and-done discoveries, and long-gap rediscoveries
 - Top 10 artist share, rank, and total views
+- Album rankings with distinct-track depth and longest same-album run
 - Linked timeline selections that open the matching overview ranking
-- CSV and JSON exports of the current Insights result
+- CSV, JSON, standalone interactive HTML, and print/PDF exports of the current result
 
-Core Insights work without Spotify authentication. When Spotify is connected, the optional Spotify Taste Profile compares short-, medium-, and long-term top artists and tracks; summarizes recent plays and listening contexts; and measures overlap with the selected archive range. Where Spotify makes audio features available, it also compares current energy, danceability, valence, acousticness, instrumentalness, speechiness, and tempo with the long-term baseline. Spotify affinity requests are cached for the browser session to avoid repeated API calls when archive filters change. Spotify only exposes up to 50 recent plays through this API, so the imported archive remains the source of historical analysis.
+Core Insights work without Spotify authentication. When Spotify is connected, the optional Spotify epilogue compares short-, medium-, and long-term top artists and tracks; summarizes recent plays and listening contexts; and measures whole-range archive overlap, affinity continuity, library/follow coverage, sampled playlist coverage, explicit-content share, and release eras. Playlist coverage is deliberately limited to the first eight returned playlists and 100 items per playlist. Spotify requests are cached for the browser session to avoid repeated API calls when archive filters change. Spotify only exposes up to 50 top items per time range and 50 recent plays through these APIs, so the imported archive remains the source of historical analysis.
 
 ## Generate Realistic Test History
 
@@ -139,12 +145,14 @@ npm run dev      # development server
 npm run build    # type-check and production build
 npm run preview  # serve the production build locally
 npm run lint     # ESLint
+npm run test:analytics # execute Insights SQL against a synthetic archive
 npm run generate:test-history -- --year 2025
 ```
 
 ## Privacy and Limits
 
 - Imported history files persist locally in browser IndexedDB until **Clear cache** or **Replace files** is used. DuckDB tables and query results remain in memory and are rebuilt locally after reload.
+- Imported IP addresses, countries, device identifiers, and other unrelated export fields are not copied into the normalized analytics table; the temporary raw table is dropped immediately after music-event normalization.
 - Visible Spotify track IDs are sent to Spotify's public oEmbed endpoint to retrieve album artwork. Playlist data and authenticated API requests are sent only when the user connects.
 - Spotify-enriched Insights metadata is cached locally in the browser and can be removed by clearing site data.
 - Tokens in browser storage are accessible to JavaScript on this origin. The app avoids third-party runtime scripts, but normal client-side security practices and dependency review still apply.

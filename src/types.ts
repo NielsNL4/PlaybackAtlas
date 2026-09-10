@@ -57,7 +57,13 @@ export interface InsightQuery {
   minMs: number
   granularity: InsightGranularity
   metric: RankingMetric
-  timezoneOffsetMinutes: number
+  timezone: string
+  timezoneTransitions: TimezoneTransition[]
+}
+
+export interface TimezoneTransition {
+  startsAt: string
+  offsetMinutes: number
 }
 
 export interface InsightSummary {
@@ -65,6 +71,79 @@ export interface InsightSummary {
   totalMs: number
   uniqueTracks: number
   uniqueArtists: number
+}
+
+export interface InsightComparison {
+  previousPlays: number
+  previousMs: number
+  playsChangePercent: number | null
+  listeningChangePercent: number | null
+}
+
+export interface InsightHighlight {
+  busiestDate: string | null
+  busiestDateMs: number
+  longestStreakDays: number
+  topTrackName: string | null
+  topTrackArtist: string | null
+  topAlbumName: string | null
+  topAlbumArtist: string | null
+}
+
+export interface InsightBehaviorPoint {
+  period: string
+  streams: number
+  qualifiedPlays: number
+  naturalEnds: number
+  earlyExits: number
+  otherEnds: number
+  shuffled: number
+  offline: number
+}
+
+export interface InsightPlatformPoint {
+  platform: string
+  streams: number
+  totalMs: number
+}
+
+export interface InsightSessionSummary {
+  sessions: number
+  averageSessionMs: number
+  longestSessionMs: number
+  averageStreams: number
+}
+
+export interface InsightSessionPoint {
+  startedAt: string
+  streams: number
+  totalMs: number
+  durationMs: number
+}
+
+export interface InsightRetention {
+  discoveries: number
+  eligible7Day: number
+  retained7Day: number
+  eligible30Day: number
+  retained30Day: number
+  oneAndDone: number
+}
+
+export interface InsightRediscovery {
+  trackName: string
+  artistName: string
+  gapDays: number
+  returnedAt: string
+}
+
+export interface InsightAlbumTotal {
+  albumName: string
+  artistName: string
+  plays: number
+  totalMs: number
+  uniqueTracks: number
+  longestRun: number
 }
 
 export interface InsightVolumePoint {
@@ -104,9 +183,19 @@ export interface InsightArtistTotal {
 
 export interface InsightResult {
   summary: InsightSummary
+  totalStreams: number
+  comparison: InsightComparison
+  highlights: InsightHighlight
   volume: InsightVolumePoint[]
   heatmap: InsightHeatmapPoint[]
   discovery: InsightDiscoveryPoint[]
+  behavior: InsightBehaviorPoint[]
+  platforms: InsightPlatformPoint[]
+  sessionSummary: InsightSessionSummary
+  longestSessions: InsightSessionPoint[]
+  retention: InsightRetention
+  rediscoveries: InsightRediscovery[]
+  albumTotals: InsightAlbumTotal[]
   artistTrends: InsightArtistPoint[]
   artistTotals: InsightArtistTotal[]
   topTrackUris: string[]

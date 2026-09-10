@@ -41,9 +41,11 @@ function quoteIdentifier(identifier: string) {
   return `"${identifier.replaceAll('"', '""')}"`
 }
 
-function firstColumn(columns: Set<string>, candidates: string[]) {
-  const column = candidates.find((candidate) => columns.has(candidate))
-  return column ? quoteIdentifier(column) : 'NULL'
+function columnValue(columns: Set<string>, candidates: string[]) {
+  const available = candidates.filter((candidate) => columns.has(candidate)).map(quoteIdentifier)
+  if (available.length === 0) return 'NULL'
+  if (available.length === 1) return available[0]
+  return `coalesce(${available.join(', ')})`
 }
 
 function sqlDate(value: string) {
@@ -56,6 +58,29 @@ function sqlInteger(value: number, minimum: number, maximum: number, label: stri
     throw new Error(`Invalid ${label}: ${value}`)
   }
   return value
+}
+
+function localTimestampSql(request: InsightQuery) {
+  if (!/^[A-Za-z0-9_+\-/]+$/.test(request.timezone)) {
+    throw new Error(`Invalid timezone: ${request.timezone}`)
+  }
+  if (!request.timezoneTransitions.length || request.timezoneTransitions.length > 1_000) {
+    throw new Error('Invalid timezone transition schedule.')
+  }
+  const transitions = request.timezoneTransitions.map((transition) => {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(transition.startsAt)) {
+      throw new Error(`Invalid timezone transition: ${transition.startsAt}`)
+    }
+    return {
+      startsAt: `'${transition.startsAt}'`,
+      offsetMinutes: sqlInteger(transition.offsetMinutes, -1_440, 1_440, 'timezone offset'),
+    }
+  })
+  const fallback = transitions[0].offsetMinutes
+  const cases = transitions.slice(1).reverse().map((transition) => (
+    `WHEN played_at >= try_cast(${transition.startsAt} AS TIMESTAMP) THEN ${transition.offsetMinutes}`
+  )).join(' ')
+  return `played_at + ((CASE ${cases} ELSE ${fallback} END) * INTERVAL 1 MINUTE)`
 }
 
 async function ingest(id: number, files: File[]): Promise<IngestResult> {
@@ -94,18 +119,18 @@ async function ingest(id: number, files: File[]): Promise<IngestResult> {
   const columns = new Set(
     description.toArray().map((row) => String(row.column_name)),
   )
-  const timestamp = firstColumn(columns, ['ts', 'endTime'])
-  const track = firstColumn(columns, ['master_metadata_track_name', 'trackName'])
-  const artist = firstColumn(columns, ['master_metadata_album_artist_name', 'artistName'])
-  const album = firstColumn(columns, ['master_metadata_album_album_name', 'albumName'])
-  const played = firstColumn(columns, ['ms_played', 'msPlayed'])
-  const uri = firstColumn(columns, ['spotify_track_uri'])
-  const skipped = firstColumn(columns, ['skipped'])
-  const shuffle = firstColumn(columns, ['shuffle'])
-  const platform = firstColumn(columns, ['platform'])
-  const offline = firstColumn(columns, ['offline'])
-  const reasonStart = firstColumn(columns, ['reason_start'])
-  const reasonEnd = firstColumn(columns, ['reason_end'])
+  const timestamp = columnValue(columns, ['ts', 'endTime'])
+  const track = columnValue(columns, ['master_metadata_track_name', 'trackName'])
+  const artist = columnValue(columns, ['master_metadata_album_artist_name', 'artistName'])
+  const album = columnValue(columns, ['master_metadata_album_album_name', 'albumName'])
+  const played = columnValue(columns, ['ms_played', 'msPlayed'])
+  const uri = columnValue(columns, ['spotify_track_uri'])
+  const skipped = columnValue(columns, ['skipped'])
+  const shuffle = columnValue(columns, ['shuffle'])
+  const platform = columnValue(columns, ['platform'])
+  const offline = columnValue(columns, ['offline'])
+  const reasonStart = columnValue(columns, ['reason_start'])
+  const reasonEnd = columnValue(columns, ['reason_end'])
 
   if (timestamp === 'NULL' || track === 'NULL' || artist === 'NULL' || played === 'NULL') {
     throw new Error('These files do not contain recognized Spotify streaming history fields.')
@@ -140,6 +165,7 @@ async function ingest(id: number, files: File[]): Promise<IngestResult> {
       ) = 1 AS is_first_play
     FROM normalized;
   `)
+  await conn.query('DROP TABLE raw_history;')
 
   post({ id, type: 'progress', progress: 90, label: 'Building analytics index' })
   await conn.query('CREATE INDEX history_date_idx ON listening_history (played_at);')
@@ -289,27 +315,31 @@ async function queryInsights(request: InsightQuery): Promise<InsightResult> {
     ? request.granularity
     : 'month'
   const metricOrder = request.metric === 'duration' ? 'total_ms' : 'plays'
+  const aggregateOrder = request.metric === 'duration' ? 'sum(ms_played)' : 'count(*)'
   const startDate = sqlDate(request.startDate)
   const endDate = sqlDate(request.endDate)
   const minMs = sqlInteger(request.minMs, 30_000, 86_400_000, 'minimum playback duration')
-  const timezoneOffset = sqlInteger(request.timezoneOffsetMinutes, -1_440, 1_440, 'timezone offset')
+  const localTimestamp = localTimestampSql(request)
   await conn.query(`
-    CREATE OR REPLACE TEMP TABLE insight_events AS
+    CREATE OR REPLACE TEMP TABLE insight_streams AS
     WITH localized AS (
       SELECT
         *,
-        played_at + (${timezoneOffset} * INTERVAL 1 MINUTE) AS local_at
+        ${localTimestamp} AS local_at
       FROM listening_history
     )
     SELECT
       date_trunc('${granularity}', local_at) AS period,
       extract(dow FROM local_at)::INTEGER AS weekday,
       extract(hour FROM local_at)::INTEGER AS hour,
+      ms_played >= ${minMs} AS is_qualified,
       *
     FROM localized
     WHERE local_at >= try_cast(${startDate} AS DATE)
-      AND local_at < try_cast(${endDate} AS DATE) + INTERVAL 1 DAY
-      AND ms_played >= ${minMs};
+      AND local_at < try_cast(${endDate} AS DATE) + INTERVAL 1 DAY;
+
+    CREATE OR REPLACE TEMP TABLE insight_events AS
+    SELECT * FROM insight_streams WHERE is_qualified;
   `)
 
   const summaryResult = await conn.query(`
@@ -320,6 +350,24 @@ async function queryInsights(request: InsightQuery): Promise<InsightResult> {
       count(DISTINCT artist_name)::DOUBLE AS unique_artists
     FROM insight_events;
   `)
+  const comparisonResult = await conn.query(`
+    WITH localized AS (
+      SELECT
+        ${localTimestamp} AS local_at,
+        ms_played
+      FROM listening_history
+    )
+    SELECT
+      count(*) FILTER (WHERE ms_played >= ${minMs})::DOUBLE AS previous_plays,
+      coalesce(sum(ms_played) FILTER (WHERE ms_played >= ${minMs}), 0)::DOUBLE AS previous_ms
+    FROM localized
+    WHERE local_at >= try_cast(${startDate} AS DATE)
+        - ((date_diff('day', try_cast(${startDate} AS DATE), try_cast(${endDate} AS DATE)) + 1) * INTERVAL 1 DAY)
+      AND local_at < try_cast(${startDate} AS DATE);
+  `)
+  const totalStreamsResult = await conn.query(
+    'SELECT count(*)::DOUBLE AS total_streams FROM insight_streams;',
+  )
   const volumeResult = await conn.query(`
     SELECT
       strftime(period, '%Y-%m-%d') AS period,
@@ -350,6 +398,251 @@ async function queryInsights(request: InsightQuery): Promise<InsightResult> {
     GROUP BY period
     ORDER BY period;
   `)
+  const behaviorResult = await conn.query(`
+    SELECT
+      strftime(period, '%Y-%m-%d') AS period,
+      count(*)::DOUBLE AS streams,
+      count(*) FILTER (WHERE is_qualified)::DOUBLE AS qualified_plays,
+      count(*) FILTER (WHERE reason_end = 'trackdone')::DOUBLE AS natural_ends,
+      count(*) FILTER (
+        WHERE coalesce(reason_end, '') != 'trackdone'
+          AND (skipped OR ms_played < 30000 OR reason_end IN ('fwdbtn', 'backbtn'))
+      )::DOUBLE AS early_exits,
+      count(*) FILTER (
+        WHERE coalesce(reason_end, '') != 'trackdone'
+          AND NOT (skipped OR ms_played < 30000 OR coalesce(reason_end, '') IN ('fwdbtn', 'backbtn'))
+      )::DOUBLE AS other_ends,
+      count(*) FILTER (WHERE shuffle)::DOUBLE AS shuffled,
+      count(*) FILTER (WHERE offline)::DOUBLE AS offline
+    FROM insight_streams
+    GROUP BY period
+    ORDER BY period;
+  `)
+  const platformsResult = await conn.query(`
+    SELECT
+      coalesce(nullif(trim(platform), ''), 'Unknown') AS platform,
+      count(*)::DOUBLE AS streams,
+      coalesce(sum(ms_played), 0)::DOUBLE AS total_ms
+    FROM insight_streams
+    GROUP BY 1
+    ORDER BY streams DESC, platform ASC
+    LIMIT 12;
+  `)
+  await conn.query(`
+    CREATE OR REPLACE TEMP TABLE insight_sessions AS
+    WITH ordered AS (
+      SELECT
+        *,
+        lag(local_at) OVER (ORDER BY local_at) AS previous_at
+      FROM insight_streams
+    ), marked AS (
+      SELECT
+        *,
+        CASE
+          WHEN previous_at IS NULL OR local_at - previous_at > INTERVAL 30 MINUTE THEN 1
+          ELSE 0
+        END AS starts_session
+      FROM ordered
+    ), grouped AS (
+      SELECT
+        *,
+        sum(starts_session) OVER (ORDER BY local_at ROWS UNBOUNDED PRECEDING) AS session_id
+      FROM marked
+    )
+    SELECT
+      session_id,
+      min(local_at) AS started_at,
+      count(*)::DOUBLE AS streams,
+      coalesce(sum(ms_played), 0)::DOUBLE AS total_ms,
+      greatest(
+        date_diff('millisecond', min(local_at), max(local_at)),
+        max(ms_played)
+      )::DOUBLE AS duration_ms
+    FROM grouped
+    GROUP BY session_id;
+  `)
+  const sessionSummaryResult = await conn.query(`
+    SELECT
+      count(*)::DOUBLE AS sessions,
+      coalesce(avg(total_ms), 0)::DOUBLE AS average_session_ms,
+      coalesce(max(duration_ms), 0)::DOUBLE AS longest_session_ms,
+      coalesce(avg(streams), 0)::DOUBLE AS average_streams
+    FROM insight_sessions;
+  `)
+  const longestSessionsResult = await conn.query(`
+    SELECT
+      strftime(started_at, '%Y-%m-%dT%H:%M:%S') AS started_at,
+      streams,
+      total_ms,
+      duration_ms
+    FROM insight_sessions
+    ORDER BY duration_ms DESC, started_at ASC
+    LIMIT 8;
+  `)
+  const retentionResult = await conn.query(`
+    WITH history AS (
+      SELECT
+        coalesce(spotify_track_uri, artist_name || chr(0) || track_name) AS track_key,
+        ${localTimestamp} AS local_at
+      FROM listening_history
+    ), discoveries AS (
+      SELECT
+        coalesce(spotify_track_uri, artist_name || chr(0) || track_name) AS track_key,
+        local_at
+      FROM insight_streams
+      WHERE is_first_play
+    ), latest AS (
+      SELECT max(local_at) AS latest_at FROM history
+    ), evaluated AS (
+      SELECT
+        discoveries.track_key,
+        discoveries.local_at,
+        latest.latest_at,
+        count(history.local_at) FILTER (WHERE history.local_at > discoveries.local_at) AS later_plays,
+        bool_or(
+          history.local_at > discoveries.local_at
+          AND history.local_at <= discoveries.local_at + INTERVAL 7 DAY
+        ) AS retained_7_day,
+        bool_or(
+          history.local_at > discoveries.local_at
+          AND history.local_at <= discoveries.local_at + INTERVAL 30 DAY
+        ) AS retained_30_day
+      FROM discoveries
+      CROSS JOIN latest
+      LEFT JOIN history ON history.track_key = discoveries.track_key
+      GROUP BY discoveries.track_key, discoveries.local_at, latest.latest_at
+    )
+    SELECT
+      count(*)::DOUBLE AS discoveries,
+      count(*) FILTER (WHERE latest_at >= local_at + INTERVAL 7 DAY)::DOUBLE AS eligible_7_day,
+      count(*) FILTER (
+        WHERE latest_at >= local_at + INTERVAL 7 DAY AND coalesce(retained_7_day, false)
+      )::DOUBLE AS retained_7_day,
+      count(*) FILTER (WHERE latest_at >= local_at + INTERVAL 30 DAY)::DOUBLE AS eligible_30_day,
+      count(*) FILTER (
+        WHERE latest_at >= local_at + INTERVAL 30 DAY AND coalesce(retained_30_day, false)
+      )::DOUBLE AS retained_30_day,
+      count(*) FILTER (WHERE later_plays = 0)::DOUBLE AS one_and_done
+    FROM evaluated;
+  `)
+  const rediscoveriesResult = await conn.query(`
+    WITH ordered AS (
+      SELECT
+        track_name,
+        artist_name,
+        ${localTimestamp} AS local_at,
+        lag(${localTimestamp}) OVER (
+          PARTITION BY coalesce(spotify_track_uri, artist_name || chr(0) || track_name)
+          ORDER BY played_at
+        ) AS previous_at
+      FROM listening_history
+      WHERE ms_played >= ${minMs}
+    )
+    SELECT
+      track_name,
+      artist_name,
+      date_diff('day', previous_at, local_at)::DOUBLE AS gap_days,
+      strftime(local_at, '%Y-%m-%d') AS returned_at
+    FROM ordered
+    WHERE local_at >= try_cast(${startDate} AS DATE)
+      AND local_at < try_cast(${endDate} AS DATE) + INTERVAL 1 DAY
+      AND date_diff('day', previous_at, local_at) >= 90
+    ORDER BY gap_days DESC, returned_at DESC, artist_name ASC, track_name ASC
+    LIMIT 10;
+  `)
+  const albumTotalsResult = await conn.query(`
+    WITH ordered AS (
+      SELECT
+        *,
+        lag(album_name) OVER (ORDER BY local_at) AS previous_album,
+        lag(artist_name) OVER (ORDER BY local_at) AS previous_artist,
+        lag(local_at) OVER (ORDER BY local_at) AS previous_at
+      FROM insight_events
+      WHERE album_name IS NOT NULL AND trim(album_name) != ''
+    ), marked AS (
+      SELECT
+        *,
+        CASE
+          WHEN previous_album IS NULL
+            OR album_name != previous_album
+            OR artist_name != previous_artist
+            OR local_at - previous_at > INTERVAL 30 MINUTE
+          THEN 1 ELSE 0
+        END AS starts_run
+      FROM ordered
+    ), grouped AS (
+      SELECT
+        *,
+        sum(starts_run) OVER (ORDER BY local_at ROWS UNBOUNDED PRECEDING) AS run_id
+      FROM marked
+    ), runs AS (
+      SELECT album_name, artist_name, run_id, count(*) AS run_length
+      FROM grouped
+      GROUP BY album_name, artist_name, run_id
+    ), longest_runs AS (
+      SELECT album_name, artist_name, max(run_length)::DOUBLE AS longest_run
+      FROM runs
+      GROUP BY album_name, artist_name
+    ), totals AS (
+      SELECT
+        album_name,
+        artist_name,
+        count(*)::DOUBLE AS plays,
+        coalesce(sum(ms_played), 0)::DOUBLE AS total_ms,
+        count(DISTINCT coalesce(spotify_track_uri, track_name))::DOUBLE AS unique_tracks
+      FROM insight_events
+      WHERE album_name IS NOT NULL AND trim(album_name) != ''
+      GROUP BY album_name, artist_name
+    )
+    SELECT totals.*, longest_runs.longest_run
+    FROM totals
+    JOIN longest_runs USING (album_name, artist_name)
+    ORDER BY ${metricOrder} DESC, album_name ASC, artist_name ASC
+    LIMIT 12;
+  `)
+  const highlightsResult = await conn.query(`
+    WITH daily AS (
+      SELECT cast(local_at AS DATE) AS active_date, sum(ms_played) AS total_ms
+      FROM insight_events
+      GROUP BY active_date
+    ), marked_days AS (
+      SELECT
+        active_date,
+        CASE
+          WHEN active_date - lag(active_date) OVER (ORDER BY active_date) = 1 THEN 0
+          ELSE 1
+        END AS starts_streak
+      FROM daily
+    ), grouped_days AS (
+      SELECT
+        active_date,
+        sum(starts_streak) OVER (ORDER BY active_date ROWS UNBOUNDED PRECEDING) AS streak_id
+      FROM marked_days
+    ), streaks AS (
+      SELECT count(*) AS streak_days FROM grouped_days GROUP BY streak_id
+    ), top_track AS (
+      SELECT track_name, artist_name
+      FROM insight_events
+      GROUP BY track_name, artist_name
+      ORDER BY ${aggregateOrder} DESC, artist_name ASC, track_name ASC
+      LIMIT 1
+    ), top_album AS (
+      SELECT album_name, artist_name
+      FROM insight_events
+      WHERE album_name IS NOT NULL AND trim(album_name) != ''
+      GROUP BY album_name, artist_name
+      ORDER BY ${aggregateOrder} DESC, artist_name ASC, album_name ASC
+      LIMIT 1
+    )
+    SELECT
+      (SELECT strftime(active_date, '%Y-%m-%d') FROM daily ORDER BY total_ms DESC, active_date ASC LIMIT 1) AS busiest_date,
+      coalesce((SELECT total_ms FROM daily ORDER BY total_ms DESC, active_date ASC LIMIT 1), 0)::DOUBLE AS busiest_date_ms,
+      coalesce((SELECT max(streak_days) FROM streaks), 0)::DOUBLE AS longest_streak_days,
+      (SELECT track_name FROM top_track) AS top_track_name,
+      (SELECT artist_name FROM top_track) AS top_track_artist,
+      (SELECT album_name FROM top_album) AS top_album_name,
+      (SELECT artist_name FROM top_album) AS top_album_artist;
+  `)
   const artistTotalsResult = await conn.query(`
     SELECT
       artist_name,
@@ -365,7 +658,7 @@ async function queryInsights(request: InsightQuery): Promise<InsightResult> {
       SELECT artist_name
       FROM insight_events
       GROUP BY artist_name
-      ORDER BY ${request.metric === 'duration' ? 'sum(ms_played)' : 'count(*)'} DESC, artist_name ASC
+      ORDER BY ${aggregateOrder} DESC, artist_name ASC
       LIMIT 10
     ), points AS (
       SELECT
@@ -391,17 +684,41 @@ async function queryInsights(request: InsightQuery): Promise<InsightResult> {
     FROM insight_events
     WHERE spotify_track_uri LIKE 'spotify:track:%'
     GROUP BY spotify_track_uri
-    ORDER BY ${request.metric === 'duration' ? 'sum(ms_played)' : 'count(*)'} DESC, spotify_track_uri ASC
-    LIMIT 100;
+    ORDER BY ${aggregateOrder} DESC, spotify_track_uri ASC;
   `)
 
   const summary = summaryResult.toArray()[0]
+  const comparison = comparisonResult.toArray()[0]
+  const previousPlays = Number(comparison.previous_plays)
+  const previousMs = Number(comparison.previous_ms)
+  const percentChange = (current: number, previous: number) => (
+    previous > 0 ? ((current - previous) / previous) * 100 : null
+  )
+  const highlights = highlightsResult.toArray()[0]
+  const sessionSummary = sessionSummaryResult.toArray()[0]
+  const retention = retentionResult.toArray()[0]
   return {
     summary: {
       totalPlays: Number(summary.total_plays),
       totalMs: Number(summary.total_ms),
       uniqueTracks: Number(summary.unique_tracks),
       uniqueArtists: Number(summary.unique_artists),
+    },
+    totalStreams: Number(totalStreamsResult.toArray()[0].total_streams),
+    comparison: {
+      previousPlays,
+      previousMs,
+      playsChangePercent: percentChange(Number(summary.total_plays), previousPlays),
+      listeningChangePercent: percentChange(Number(summary.total_ms), previousMs),
+    },
+    highlights: {
+      busiestDate: highlights.busiest_date == null ? null : String(highlights.busiest_date),
+      busiestDateMs: Number(highlights.busiest_date_ms),
+      longestStreakDays: Number(highlights.longest_streak_days),
+      topTrackName: highlights.top_track_name == null ? null : String(highlights.top_track_name),
+      topTrackArtist: highlights.top_track_artist == null ? null : String(highlights.top_track_artist),
+      topAlbumName: highlights.top_album_name == null ? null : String(highlights.top_album_name),
+      topAlbumArtist: highlights.top_album_artist == null ? null : String(highlights.top_album_artist),
     },
     volume: volumeResult.toArray().map((row) => ({
       period: String(row.period),
@@ -420,6 +737,55 @@ async function queryInsights(request: InsightQuery): Promise<InsightResult> {
       period: String(row.period),
       firstPlays: Number(row.first_plays),
       repeatPlays: Number(row.repeat_plays),
+    })),
+    behavior: behaviorResult.toArray().map((row) => ({
+      period: String(row.period),
+      streams: Number(row.streams),
+      qualifiedPlays: Number(row.qualified_plays),
+      naturalEnds: Number(row.natural_ends),
+      earlyExits: Number(row.early_exits),
+      otherEnds: Number(row.other_ends),
+      shuffled: Number(row.shuffled),
+      offline: Number(row.offline),
+    })),
+    platforms: platformsResult.toArray().map((row) => ({
+      platform: String(row.platform),
+      streams: Number(row.streams),
+      totalMs: Number(row.total_ms),
+    })),
+    sessionSummary: {
+      sessions: Number(sessionSummary.sessions),
+      averageSessionMs: Number(sessionSummary.average_session_ms),
+      longestSessionMs: Number(sessionSummary.longest_session_ms),
+      averageStreams: Number(sessionSummary.average_streams),
+    },
+    longestSessions: longestSessionsResult.toArray().map((row) => ({
+      startedAt: String(row.started_at),
+      streams: Number(row.streams),
+      totalMs: Number(row.total_ms),
+      durationMs: Number(row.duration_ms),
+    })),
+    retention: {
+      discoveries: Number(retention.discoveries),
+      eligible7Day: Number(retention.eligible_7_day),
+      retained7Day: Number(retention.retained_7_day),
+      eligible30Day: Number(retention.eligible_30_day),
+      retained30Day: Number(retention.retained_30_day),
+      oneAndDone: Number(retention.one_and_done),
+    },
+    rediscoveries: rediscoveriesResult.toArray().map((row) => ({
+      trackName: String(row.track_name),
+      artistName: String(row.artist_name),
+      gapDays: Number(row.gap_days),
+      returnedAt: String(row.returned_at),
+    })),
+    albumTotals: albumTotalsResult.toArray().map((row) => ({
+      albumName: String(row.album_name),
+      artistName: String(row.artist_name),
+      plays: Number(row.plays),
+      totalMs: Number(row.total_ms),
+      uniqueTracks: Number(row.unique_tracks),
+      longestRun: Number(row.longest_run),
     })),
     artistTotals: artistTotalsResult.toArray().map((row) => ({
       artistName: String(row.artist_name),
